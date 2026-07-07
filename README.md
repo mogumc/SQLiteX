@@ -65,3 +65,58 @@ _核心机制： 提供云原生友好的开发体验，内建生产级监控与
 内建可观测性： 在生成的 CRUD 方法和写队列中原生提供 Prometheus Metrics 埋点，实时监控吞吐、延迟、热缓存命中率与队列深度。  
 零停机热备份： 支持调用无阻塞的 Checkpoint/Snapshot API，利用 Pebble 底层的不可变快照特性，实现生产环境下的零停机热备份与数据导出。  
 配套独立 CLI 工具： 快速生成标准化 Proto 表结构文件，简化 Schema 编写；CLI 子命令启动轻量 Web 面板服务，加载 Proto 与数据库目录，实现可视化数据调试与管理。  
+
+## 开发路线图 (Roadmap)
+
+_核心策略： 遵循“底层复用、上层创新、小步快跑”的原则。优先打通编译时引擎（核心灵魂），随后逐步补齐高级存储特性与生产级加固，避免在底层存储引擎上陷入过度设计的泥潭。_
+
+### Phase 0: 底层对接与 MVP 验证 (Foundation & MVP)
+_目标： 跑通 Pebble 底层封装，验证“轻量”与“高吞吐”的基准指标，建立最小可用的 KV 读写链路。_
+
+*   **Pebble 极简封装**：集成 Pebble 引擎，放弃单文件打包，直接使用其原生目录结构。配置 `ProfileEdge`（边缘模式），严格限制 BlockCache（如 8MB）和 MemTable（如 4MB），验证低内存 footprint。
+*   **基础路由与编码**：实现 `[TableID (Uvarint)] + [PrimaryKey (Bytes)]` 的 Key 编码逻辑，以及基础的 Value 字节流透传。
+*   **MPSC 写队列 V1**：实现多生产者单消费者模型，带缓冲 Channel 接收写请求，后台单 Goroutine 消费并调用 Pebble 的 `Batch` 提交。
+*   **背压限流机制**：实现写队列长度硬限制与基于 `runtime.MemStats` 的全局内存水位监控，队列满或内存超限时触发背压（返回 `ErrWriteThrottled`）。
+*   **里程碑交付**：`sqlitex` 基础包发布，支持通过原生 API 进行高并发、低内存占用的基础 Put/Get/Delete 操作。
+
+### Phase 1: 编译时引擎与零反射 DX (Compile-Time Engine)
+_目标： 打造项目的核心灵魂——`protoc-gen-sqlitex`，实现从 Proto 定义到强类型、零反射 Go 代码的完整闭环。_
+
+*   **AST 解析与 Option 提取**：开发 protoc 插件，解析 Protobuf AST，提取 Message 结构、字段类型，以及自定义 Options（如 `compress`, `index`, `ttl`）。
+*   **零反射序列化生成**：生成硬编码 `binary.LittleEndian` 和 `varint` 的序列化/反序列化代码，实现 Struct 到 Bytes 的直接内存映射，并自动生成精确的 `Size()` 方法。
+*   **强类型 CRUD 与 Fluent API**：为每个 Message 生成独立的 Store Interface、链式查询构建器（支持 Where/Limit/OrderBy）以及用于单元测试的 Mock 实现。
+*   **Value 结构重构**：在生成代码中实现 `Meta Header`（偏移量/压缩标识）与 `Payload` 的分离逻辑，为后续局部压缩打下基础。
+*   **里程碑交付**：`protoc-gen-sqlitex` 插件发布。业务侧只需编写 `.proto` 文件，即可生成具备完整 CRUD、链式查询和 Mock 能力的强类型 Go 代码。
+
+### Phase 2: 核心存储特性与读性能护城河 (Advanced Features)
+_目标： 实现 SQLiteX 区别于普通 KV 库的高级特性，重点解决“读热点打穿”和“大字段 CPU 浪费”两大生产痛点。_
+
+*   **TinyLFU 热缓存层**：
+    *   引入 Count-Min Sketch 进行热点探测，免疫全表扫描导致的缓存污染。
+    *   利用生成的 `Size()` 方法实现精确到字节的缓存内存管控。
+    *   集成 `singleflight` 防止 Cache Miss 时的并发击穿，实现空值（Tombstone）短 TTL 缓存。
+*   **细粒度局部压缩**：实现基于字段大小阈值（如 >256 Bytes）和 `.proto` Option 标记的 Zstd/LZ4 动态压缩/解压调度，元数据保持明文。
+*   **自动化二级索引**：在编译时生成二级索引（IndexKey -> PrimaryKey）的维护逻辑。在 MPSC 写队列中，将主数据与索引数据聚合为单次 Pebble 事务提交，保证原子性。
+*   **O(1) 游标分页**：在 Fluent API 中强制实现基于 `[TableID] + [LastKey]` 的 Seek 游标分页，彻底废弃 OFFSET。
+*   **里程碑交付**：引擎具备抗读热点打穿能力、低 CPU 损耗的大字段查询能力，以及高效的深分页性能。
+
+### Phase 3: 生产级加固、生命周期与生态 (Production Hardening)
+_目标： 补齐企业级/生产环境所需的可观测性、数据生命周期管理与运维工具，达到 Production-Ready 状态。_
+
+*   **TTL 与生命周期管理**：结合 Pebble 原生的 `ExpiresAt` 与上层的 Meta Header 时间戳，实现读取时的惰性删除（Lazy Deletion）与 Compaction 阶段的物理清理联动。
+*   **内建可观测性**：在生成的 CRUD 方法、热缓存层和 MPSC 队列中注入 Prometheus Metrics（涵盖 QPS、延迟 P99、缓存命中率、内存/磁盘使用率、队列深度）。
+*   **零停机热备份**：封装 Pebble 的 `Checkpoint` API，提供无阻塞的快照导出功能，支持将数据目录安全拷贝至备份路径。
+*   **独立 Web Admin 工具**：开发轻量级 CLI 工具，读取 `.proto` 文件和 Pebble 数据目录，启动内嵌的 HTTP Server 提供可视化数据浏览、Schema 查看与基础调试面板。
+*   **稳定性与混沌测试**：引入故障注入测试（如随机 Kill 进程、磁盘满模拟、IO 延迟），验证 WAL 崩溃恢复与数据一致性。
+*   **里程碑交付**：SQLiteX v1.0.0 正式版发布，具备完整的生产级运维能力与可观测性，文档与示例库完善。
+
+### 📌 长期演进方向 (Future Explorations)
+
+*   **跨表只读视图 (Read-Only Views)**：利用 Pebble 的 MVCC 快照，支持在同一个 Sequence ID 下对多张表进行一致性只读查询（不保证跨表写原子性）。
+*   **边缘数据同步 (Edge Sync)**：探索基于 WAL 变更流（Change Stream）的轻量级主从同步协议，适配云边协同场景。
+*   **多语言 SDK 扩展**：通过 FFI 或 gRPC 网关，将 SQLiteX 的能力暴露给 Rust/C++ 或前端 Node.js 环境。
+
+## _目前项目仍在开发中！_
+
+## License
+MIT License
