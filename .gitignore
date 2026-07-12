@@ -28,5 +28,14 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+
+# Agent
+.copilt/
+.trae/
+.claude/
+.codex/
+.codebuddy/
+.workbuddy/
+.trellis/
