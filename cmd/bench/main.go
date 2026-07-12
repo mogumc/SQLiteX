@@ -23,14 +23,22 @@ func main() {
 	ops := flag.Int("ops", 10000, "每个 worker 的操作次数")
 	valueSize := flag.Int("value-size", 128, "Value 大小（字节）")
 	queueLen := flag.Int("queue-len", 4096, "写队列长度")
+	asyncWAL := flag.Bool("async-wal", false, "启用异步 WAL（NoSync 写入）")
+	walBytesPerSync := flag.Int("wal-bytes-per-sync", 0, "WAL 后台 sync 字节间隔（0=不启用）")
+	walMinSyncInterval := flag.Duration("wal-min-sync-interval", 0, "WAL 最小 sync 间隔")
+	batchCommitSize := flag.Int("batch-commit-size", 0, "组提交批量大小（0=逐条写入）")
 	flag.Parse()
 
 	// 清理旧数据
 	os.RemoveAll(*dir)
 
 	db, err := sqlitex.Open(sqlitex.Config{
-		Dir:         *dir,
-		MaxQueueLen: *queueLen,
+		Dir:                *dir,
+		MaxQueueLen:        *queueLen,
+		AsyncWAL:           *asyncWAL,
+		WALBytesPerSync:    *walBytesPerSync,
+		WALMinSyncInterval: *walMinSyncInterval,
+		BatchCommitSize:    *batchCommitSize,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Open failed: %v\n", err)
@@ -40,6 +48,17 @@ func main() {
 
 	fmt.Println("=== SQLiteX Benchmark ===")
 	fmt.Printf("Workers: %d, Ops/Worker: %d, ValueSize: %d bytes\n", *workers, *ops, *valueSize)
+	if *asyncWAL {
+		fmt.Printf("WAL: async (NoSync), BytesPerSync: %d, MinSyncInterval: %v\n",
+			*walBytesPerSync, *walMinSyncInterval)
+	} else {
+		fmt.Println("WAL: sync (每写 fsync)")
+	}
+	if *batchCommitSize > 0 {
+		fmt.Printf("Batch Commit: %d ops/batch\n", *batchCommitSize)
+	} else {
+		fmt.Println("Batch Commit: disabled (逐条写入)")
+	}
 	fmt.Println()
 
 	// 生成固定大小的 value

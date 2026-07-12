@@ -1,5 +1,7 @@
 package sqlitex
 
+import "time"
+
 // Config 定义数据库打开时的所有可调参数。
 // 零值代表使用 ProfileEdge 默认配置。
 type Config struct {
@@ -22,6 +24,35 @@ type Config struct {
 	// 基于 runtime.MemStats.Alloc 采样，超限时拒绝新写入。
 	// 默认 0 表示不启用内存监控。
 	MaxMemMB int64
+
+	// DisableWAL 完全禁用 WAL，崩溃时无法恢复数据。
+	// 仅适用于可容忍数据丢失的场景（如临时缓存）。
+	// 默认 false（启用 WAL）。
+	DisableWAL bool
+
+	// AsyncWAL 启用异步 WAL：写入使用 NoSync 而非 Sync，
+	// 配合 WALBytesPerSync 由 Pebble 后台周期性落盘。
+	// 崩溃时可能丢失最近未 sync 的数据。
+	// 默认 false（每写 fsync，保证持久性）。
+	AsyncWAL bool
+
+	// WALBytesPerSync WAL 后台 sync 的字节间隔。
+	// 仅 AsyncWAL=true 时生效。
+	// 0 表示不启用后台 sync（依赖操作系统刷盘）。
+	// 推荐值：1MB (1 << 20)。
+	WALBytesPerSync int
+
+	// WALMinSyncInterval WAL 两次 sync 之间的最小间隔。
+	// 引入人工延迟让更多写入合并到同一次 sync，减少 IOPS。
+	// 仅 AsyncWAL=true 时生效。
+	// 默认 0（不延迟）。
+	WALMinSyncInterval time.Duration
+
+	// BatchCommitSize 组提交批量大小。
+	// >0 时 consumeLoop 攒批至多 N 个 op，合并为单次 Pebble Batch 提交。
+	// 0 表示逐条写入（当前行为）。
+	// 推荐值：32-128，取决于写入量和延迟容忍度。
+	BatchCommitSize int
 }
 
 // applyDefaults 将零值填充为 ProfileEdge 预设。

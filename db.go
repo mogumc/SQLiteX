@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/mogumc/sqlitex/internal/writequeue"
@@ -34,16 +35,42 @@ func Open(cfg Config) (*DB, error) {
 		MemTableStopWritesThreshold: 2,
 	}
 
+	// 配置 WAL 相关选项
+	if cfg.DisableWAL {
+		opts.DisableWAL = true
+	}
+	if cfg.AsyncWAL {
+		if cfg.WALBytesPerSync > 0 {
+			opts.WALBytesPerSync = cfg.WALBytesPerSync
+		}
+		if cfg.WALMinSyncInterval > 0 {
+			interval := cfg.WALMinSyncInterval // 捕获到闭包外避免循环引用
+			opts.WALMinSyncInterval = func() time.Duration {
+				return interval
+			}
+		}
+	}
+
 	pdb, err := pebble.Open(cfg.Dir, opts)
 	if err != nil {
 		cache.Unref()
 		return nil, fmt.Errorf("sqlitex: open pebble: %w", err)
 	}
 
+	// 根据 AsyncWAL 选择 WriteOptions
+	writeOpts := pebble.Sync
+	if cfg.AsyncWAL {
+		writeOpts = pebble.NoSync
+	}
+
 	q := writequeue.New(writequeue.Config{
-		MaxLen:   cfg.MaxQueueLen,
-		MaxMemMB: cfg.MaxMemMB,
-		Putter:   &pebblePutter{db: pdb},
+		MaxLen:    cfg.MaxQueueLen,
+		MaxMemMB:  cfg.MaxMemMB,
+		BatchSize: cfg.BatchCommitSize,
+		Putter: &pebblePutter{
+			db:        pdb,
+			writeOpts: writeOpts,
+		},
 	})
 
 	return &DB{
@@ -105,6 +132,7 @@ func (db *DB) Delete(key []byte) error {
 }
 
 // PutSync 同步写入，绕过 MPSC 队列直接写入 Pebble。
+// 始终使用 pebble.Sync，不受 AsyncWAL 配置影响。
 // 仅用于特殊场景（如需要严格顺序保证的初始化写入）。
 func (db *DB) PutSync(key, value []byte) error {
 	if db.closed.Load() {
@@ -137,17 +165,41 @@ func (db *DB) submit(key, value []byte, opType writequeue.OpType) error {
 	return <-done
 }
 
-// pebblePutter 实现 writequeue.Putter 接口，桥接队列与 Pebble。
+// pebblePutter 实现 writequeue.Putter 和 writequeue.BatchPutter 接口，
+// 桥接队列与 Pebble。writeOpts 控制每次写入是否 fsync。
 type pebblePutter struct {
-	db *pebble.DB
+	db        *pebble.DB
+	writeOpts *pebble.WriteOptions
 }
 
+// Set 逐条写入键值对。
 func (p *pebblePutter) Set(key, value []byte) error {
-	return p.db.Set(key, value, pebble.Sync)
+	return p.db.Set(key, value, p.writeOpts)
 }
 
+// Delete 逐条删除键。
 func (p *pebblePutter) Delete(key []byte) error {
-	return p.db.Delete(key, pebble.Sync)
+	return p.db.Delete(key, p.writeOpts)
+}
+
+// ApplyBatch 批量提交一组操作，合并为单次 Pebble Batch 写入。
+// Pebble Batch 是原子的：全成功或全失败。
+func (p *pebblePutter) ApplyBatch(entries []writequeue.BatchEntry) error {
+	batch := p.db.NewBatch()
+	for i := range entries {
+		var err error
+		switch entries[i].Op {
+		case writequeue.OpPut:
+			err = batch.Set(entries[i].Key, entries[i].Value, p.writeOpts)
+		case writequeue.OpDelete:
+			err = batch.Delete(entries[i].Key, p.writeOpts)
+		}
+		if err != nil {
+			batch.Close()
+			return err
+		}
+	}
+	return batch.Commit(p.writeOpts)
 }
 
 // PrefixIterator 封装 Pebble 迭代器，用于前缀扫描。
