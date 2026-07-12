@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package sqlitex;
+
+option go_package = "github.com/mogumc/sqlitex/proto/sqlitex;sqlitexpb";
+
+import "google/protobuf/descriptor.proto";
+
+// TableOption 标记在 Message 上，声明该 Message 对应一张表。
+message TableOption {
+  // 主键字段名（必填）。该字段必须是 int64/uint64/string 类型。
+  string primary_key = 1;
+
+  // 全局压缩开关。启用后对超过阈值的变长字段自动压缩。
+  bool compress = 2;
+
+  // 压缩阈值（字节），仅当 compress=true 时生效。
+  // 变长字段（string/bytes）超过此值时触发压缩，默认 256。
+  int32 compress_threshold = 3;
+}
+
+// IndexOption 标记在字段上，声明该字段需要二级索引。
+enum IndexOption {
+  // 不创建索引（默认）。
+  INDEX_NONE = 0;
+  // 普通索引，允许重复值。
+  INDEX_NORMAL = 1;
+  // 唯一索引，值必须唯一。
+  INDEX_UNIQUE = 2;
+}
+
+// FieldOption 标记在字段上，控制字段级别的存储行为。
+message FieldOption {
+  // 是否为该字段创建索引。
+  IndexOption index = 1;
+
+  // 是否压缩该字段（覆盖表级 compress 设置）。
+  // 仅对 string/bytes 类型有效。
+  bool compress = 2;
+
+  // 是否作为主键字段（配合 TableOption.primary_key 使用）。
+  bool primary_key = 3;
+
+  // TTL 过期时间字符串，如 "30d"、"24h"。
+  // 过期数据在读取时惰性删除。
+  string ttl = 4;
+}
+
+// Message 级 Option：声明该 Message 为表。
+extend google.protobuf.MessageOptions {
+  optional TableOption table = 50000;
+}
+
+// Field 级 Option：控制字段行为。
+extend google.protobuf.FieldOptions {
+  optional FieldOption field = 50001;
+}

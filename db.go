@@ -149,3 +149,70 @@ func (p *pebblePutter) Set(key, value []byte) error {
 func (p *pebblePutter) Delete(key []byte) error {
 	return p.db.Delete(key, pebble.Sync)
 }
+
+// PrefixIterator 封装 Pebble 迭代器，用于前缀扫描。
+// Next 按 Key 顺序推进，调用方必须在使用后调用 Close 释放资源。
+type PrefixIterator struct {
+	iter    *pebble.Iterator
+	prefix  []byte
+	started bool
+}
+
+// Valid 返回迭代器当前位置是否有效且在指定前缀范围内。
+func (it *PrefixIterator) Valid() bool {
+	if !it.iter.Valid() {
+		return false
+	}
+	k := it.iter.Key()
+	if len(k) < len(it.prefix) {
+		return false
+	}
+	for i := 0; i < len(it.prefix); i++ {
+		if k[i] != it.prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Next 推进到下一个 Key。
+// 首次调用时定位到第一条记录，后续调用推进到下一条。
+func (it *PrefixIterator) Next() bool {
+	if !it.started {
+		it.started = true
+		it.iter.First()
+		return it.Valid()
+	}
+	it.iter.Next()
+	return it.Valid()
+}
+
+// Key 返回当前记录的 Key（字节切片）。
+func (it *PrefixIterator) Key() []byte {
+	return it.iter.Key()
+}
+
+// Value 返回当前记录的 Value（字节切片）。
+func (it *PrefixIterator) Value() []byte {
+	return it.iter.Value()
+}
+
+// Close 释放迭代器资源。
+func (it *PrefixIterator) Close() error {
+	return it.iter.Close()
+}
+
+// Iterate 创建一个前缀迭代器，用于按 Key 顺序扫描指定前缀的所有记录。
+func (db *DB) Iterate(prefix []byte) *PrefixIterator {
+	if db.closed.Load() || len(prefix) == 0 {
+		return nil
+	}
+	iter, err := db.pebble.NewIter(&pebble.IterOptions{LowerBound: prefix})
+	if err != nil {
+		return nil
+	}
+	return &PrefixIterator{
+		iter:   iter,
+		prefix: prefix,
+	}
+}
