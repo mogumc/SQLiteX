@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Config 定义缓存参数。
@@ -33,9 +34,13 @@ type TinyLFU struct {
 	curBytes     int64
 	admThreshold uint32
 
-	hits      atomic.Int64
-	misses    atomic.Int64
-	evictions atomic.Int64
+	hits        atomic.Int64
+	misses      atomic.Int64
+	evictions   atomic.Int64
+	sweepCycles atomic.Int64 // 清扫轮次
+
+	stopCh chan struct{} // 通知 sweeper 退出
+	wg     sync.WaitGroup
 }
 
 type entry struct {
@@ -47,6 +52,12 @@ type entry struct {
 // entryOverhead 为 map bucket + list.Element + entry struct + 字符串双存的均摊开销。
 // MaxBytes 管控的是 "entry.size"，即 len(key)+len(value)+entryOverhead，反映真实内存占用。
 const entryOverhead = 128
+
+// sweepInterval 后台清扫间隔。定期逐出 LRU 队尾冷项，防止热点褪去后常驻内存。
+const sweepInterval = 30 * time.Second
+
+// sweepRatio 每次清扫逐出的 LRU 队尾比例（1/4 = 25%）。
+const sweepRatio = 4
 
 // New 创建 TinyLFU 缓存。
 func New(cfg Config) *TinyLFU {
@@ -60,14 +71,19 @@ func New(cfg Config) *TinyLFU {
 		cfg.AdmissionThreshold = 2
 	}
 
-	return &TinyLFU{
+	tc := &TinyLFU{
 		sketch:       newCountMinSketch(),
 		cache:        make(map[string]*list.Element),
 		lru:          list.New(),
 		maxBytes:     cfg.MaxBytes,
 		maxItemBytes: cfg.MaxItemBytes,
 		admThreshold: cfg.AdmissionThreshold,
+		stopCh:       make(chan struct{}),
 	}
+
+	tc.wg.Add(1)
+	go tc.sweepLoop()
+	return tc
 }
 
 // Get 从缓存获取值。命中返回 (value, true)，未命中返回 (nil, false)。
@@ -136,13 +152,51 @@ func (c *TinyLFU) Delete(key string) {
 	}
 }
 
-// Stats 返回缓存运行指标：命中、未命中、驱逐次数、当前条目数、当前字节数。
-func (c *TinyLFU) Stats() (hits, misses, evictions, entries int64, curBytes int64) {
+// Close 停止后台清扫 goroutine。
+// 缓存本身仍可用（Get/Set/Delete 不受影响），仅停止冷项回收。
+func (c *TinyLFU) Close() {
+	close(c.stopCh)
+	c.wg.Wait()
+}
+
+// sweepLoop 后台定期清扫 LRU 队尾冷项，防止热点褪去后常驻内存。
+// 每次清扫逐出队尾 25% 的条目，冷项自然从底部消失。
+func (c *TinyLFU) sweepLoop() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.sweep()
+		}
+	}
+}
+
+// sweep 逐出 LRU 队尾 sweepRatio 分之一的条目。
+func (c *TinyLFU) sweep() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n := c.lru.Len() / sweepRatio
+	if n < 1 {
+		return
+	}
+	for i := 0; i < n; i++ {
+		c.evictLocked()
+	}
+	c.sweepCycles.Add(1)
+}
+
+// Stats 返回缓存运行指标：命中、未命中、驱逐次数、当前条目数、当前字节数、清扫轮次。
+func (c *TinyLFU) Stats() (hits, misses, evictions, entries, curBytes, sweeps int64) {
 	c.mu.RLock()
 	entries = int64(c.lru.Len())
 	curBytes = c.curBytes
 	c.mu.RUnlock()
-	return c.hits.Load(), c.misses.Load(), c.evictions.Load(), entries, curBytes
+	return c.hits.Load(), c.misses.Load(), c.evictions.Load(), entries, curBytes, c.sweepCycles.Load()
 }
 
 // evictLocked 驱逐 LRU 尾部条目，调用方必须持有写锁。

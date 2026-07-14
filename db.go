@@ -109,14 +109,17 @@ func (db *DB) Close() error {
 	db.queue.Stop()
 	err := db.pebble.Close()
 	db.cache.Unref()
+	if db.hotCache != nil {
+		db.hotCache.Close()
+	}
 	return err
 }
 
 // CacheStats 返回 TinyLFU 缓存的运行指标。
 // 缓存禁用时返回全零。
-func (db *DB) CacheStats() (hits, misses, evictions, entries, curBytes int64) {
+func (db *DB) CacheStats() (hits, misses, evictions, entries, curBytes, sweeps int64) {
 	if db.hotCache == nil {
-		return 0, 0, 0, 0, 0
+		return 0, 0, 0, 0, 0, 0
 	}
 	return db.hotCache.Stats()
 }
@@ -133,6 +136,9 @@ func (db *DB) Put(key, value []byte) error {
 // Get 读取指定 Key 的值。
 // Key 不存在时返回 (nil, nil)，不视为错误。
 // TinyLFU 缓存命中时直接返回，零 Pebble 穿透。
+//
+// Phase 3 兼容性：当 Pebble 返回 NotFound（含 TTL 惰性过期）时，
+// 同步逐出 TinyLFU 中的残留缓存，防止双读不一致。
 func (db *DB) Get(key []byte) ([]byte, error) {
 	if db.closed.Load() {
 		return nil, ErrDBClosed
@@ -152,6 +158,10 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	val, closer, err := db.pebble.Get(key)
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
+			// Phase 3 TTL联动: 过期 key 可能在 TinyLFU 中仍有残留缓存
+			if db.hotCache != nil {
+				db.hotCache.Delete(string(key))
+			}
 			return nil, nil
 		}
 		return nil, fmt.Errorf("sqlitex: get: %w", err)
