@@ -117,7 +117,7 @@ func (db *DB) Close() error {
 
 // CacheStats 返回 TinyLFU 缓存的运行指标。
 // 缓存禁用时返回全零。
-func (db *DB) CacheStats() (hits, misses, evictions, entries, curBytes, sweeps int64) {
+func (db *DB) CacheStats() (hits, misses, evictions, entries, curBytes, expirations int64) {
 	if db.hotCache == nil {
 		return 0, 0, 0, 0, 0, 0
 	}

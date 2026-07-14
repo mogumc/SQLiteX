@@ -19,10 +19,19 @@ type Config struct {
 	MaxItemBytes int64
 	// AdmissionThreshold 进入缓存所需的最小访问频次。
 	AdmissionThreshold uint32
+	// DefaultTTL 缓存条目默认过期时间，0 使用默认值 60s。
+	// 每次访问通过 atomic.Store 续期，仅真正冷项自然过期。
+	// Phase 3 兼容：Pebble TTL 过期后 NotFound 路径会主动删除缓存条目。
+	DefaultTTL time.Duration
 }
 
-// TinyLFU 实现 Count-Min Sketch + LRU 的轻量级热点缓存。
+// TinyLFU 实现 Count-Min Sketch + LRU + TTL 的轻量级热点缓存。
 // 零依赖、纯内存、线程安全。
+//
+// 回收机制（三层）：
+//   - TTL 原子续期：热 Key 每次访问自动续命，冷 Key 自然过期
+//   - LRU 满载驱逐：超 MaxBytes 时按队尾淘汰
+//   - CountMinSketch 频率退化：每 100 万次全局右移，防止准入阈值失效
 type TinyLFU struct {
 	sketch   *countMinSketch
 	cache    map[string]*list.Element
@@ -33,31 +42,30 @@ type TinyLFU struct {
 	maxItemBytes int64
 	curBytes     int64
 	admThreshold uint32
+	ttl          int64 // 默认 TTL (纳秒)
 
-	hits        atomic.Int64
-	misses      atomic.Int64
-	evictions   atomic.Int64
-	sweepCycles atomic.Int64 // 清扫轮次
+	hits      atomic.Int64
+	misses    atomic.Int64
+	evictions atomic.Int64
+	expirations atomic.Int64
 
-	stopCh chan struct{} // 通知 sweeper 退出
+	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
 
 type entry struct {
-	key   string
-	value []byte
-	size  int64
+	key       string
+	value     []byte
+	size      int64
+	expiresAt int64 // UnixNano, atomic 访问
 }
 
 // entryOverhead 为 map bucket + list.Element + entry struct + 字符串双存的均摊开销。
 // MaxBytes 管控的是 "entry.size"，即 len(key)+len(value)+entryOverhead，反映真实内存占用。
 const entryOverhead = 128
 
-// sweepInterval 后台清扫间隔。定期逐出 LRU 队尾冷项，防止热点褪去后常驻内存。
+// sweepInterval TTL 过期清扫间隔。Sweeper 仅逐出已过期条目，不盲目按比例驱逐。
 const sweepInterval = 30 * time.Second
-
-// sweepRatio 每次清扫逐出的 LRU 队尾比例（1/4 = 25%）。
-const sweepRatio = 4
 
 // New 创建 TinyLFU 缓存。
 func New(cfg Config) *TinyLFU {
@@ -70,6 +78,9 @@ func New(cfg Config) *TinyLFU {
 	if cfg.AdmissionThreshold <= 1 {
 		cfg.AdmissionThreshold = 2
 	}
+	if cfg.DefaultTTL <= 0 {
+		cfg.DefaultTTL = 60 * time.Second
+	}
 
 	tc := &TinyLFU{
 		sketch:       newCountMinSketch(),
@@ -78,6 +89,7 @@ func New(cfg Config) *TinyLFU {
 		maxBytes:     cfg.MaxBytes,
 		maxItemBytes: cfg.MaxItemBytes,
 		admThreshold: cfg.AdmissionThreshold,
+		ttl:          int64(cfg.DefaultTTL),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -87,14 +99,34 @@ func New(cfg Config) *TinyLFU {
 }
 
 // Get 从缓存获取值。命中返回 (value, true)，未命中返回 (nil, false)。
-// 纯读操作，仅获取 RLock，无写锁争用。
+// 纯读操作，仅获取 RLock，无写锁争用。TTL 过期时升级为写锁逐出。
 func (c *TinyLFU) Get(key string) ([]byte, bool) {
 	c.mu.RLock()
 	elem, ok := c.cache[key]
 	if ok {
-		c.mu.RUnlock()
-		c.hits.Add(1)
 		ent := elem.Value.(*entry)
+		now := time.Now().UnixNano()
+		if now > atomic.LoadInt64(&ent.expiresAt) {
+			// TTL 过期，升级为写锁精确逐出此条
+			c.mu.RUnlock()
+			c.mu.Lock()
+			if elem2, ok2 := c.cache[key]; ok2 {
+				ent2 := elem2.Value.(*entry)
+				if now > atomic.LoadInt64(&ent2.expiresAt) {
+					c.curBytes -= ent2.size
+					c.lru.Remove(elem2)
+					delete(c.cache, key)
+					c.expirations.Add(1)
+				}
+			}
+			c.mu.Unlock()
+			c.misses.Add(1)
+			return nil, false
+		}
+		c.mu.RUnlock()
+		// 访问续期 — 无锁
+		atomic.StoreInt64(&ent.expiresAt, now+c.ttl)
+		c.hits.Add(1)
 		v := make([]byte, len(ent.value))
 		copy(v, ent.value)
 		return v, true
@@ -134,7 +166,7 @@ func (c *TinyLFU) Set(key string, value []byte) {
 		c.evictLocked()
 	}
 
-	ent := &entry{key: key, value: value, size: itemSize}
+	ent := &entry{key: key, value: value, size: itemSize, expiresAt: time.Now().UnixNano() + c.ttl}
 	elem := c.lru.PushFront(ent)
 	c.cache[key] = elem
 	c.curBytes += itemSize
@@ -159,8 +191,7 @@ func (c *TinyLFU) Close() {
 	c.wg.Wait()
 }
 
-// sweepLoop 后台定期清扫 LRU 队尾冷项，防止热点褪去后常驻内存。
-// 每次清扫逐出队尾 25% 的条目，冷项自然从底部消失。
+// sweepLoop 后台定期扫描过期条目。仅逐出 expiresAt < now 的条目，不盲目按比例驱逐。
 func (c *TinyLFU) sweepLoop() {
 	defer c.wg.Done()
 	ticker := time.NewTicker(sweepInterval)
@@ -170,33 +201,38 @@ func (c *TinyLFU) sweepLoop() {
 		case <-c.stopCh:
 			return
 		case <-ticker.C:
-			c.sweep()
+			c.sweepExpired()
 		}
 	}
 }
 
-// sweep 逐出 LRU 队尾 sweepRatio 分之一的条目。
-func (c *TinyLFU) sweep() {
+// sweepExpired 从 LRU 队尾扫描并逐出所有已过期条目。
+// 队尾是最旧的，遇到第一个未过期即停止（后续条目更年轻）。
+func (c *TinyLFU) sweepExpired() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	n := c.lru.Len() / sweepRatio
-	if n < 1 {
-		return
+	now := time.Now().UnixNano()
+	for c.lru.Len() > 0 {
+		tail := c.lru.Back()
+		ent := tail.Value.(*entry)
+		if now <= atomic.LoadInt64(&ent.expiresAt) {
+			break
+		}
+		c.curBytes -= ent.size
+		c.lru.Remove(tail)
+		delete(c.cache, ent.key)
+		c.expirations.Add(1)
 	}
-	for i := 0; i < n; i++ {
-		c.evictLocked()
-	}
-	c.sweepCycles.Add(1)
 }
 
-// Stats 返回缓存运行指标：命中、未命中、驱逐次数、当前条目数、当前字节数、清扫轮次。
-func (c *TinyLFU) Stats() (hits, misses, evictions, entries, curBytes, sweeps int64) {
+// Stats 返回缓存运行指标：命中、未命中、LRU驱逐、当前条目、当前字节、TTL过期。
+func (c *TinyLFU) Stats() (hits, misses, evictions, entries, curBytes, expirations int64) {
 	c.mu.RLock()
 	entries = int64(c.lru.Len())
 	curBytes = c.curBytes
 	c.mu.RUnlock()
-	return c.hits.Load(), c.misses.Load(), c.evictions.Load(), entries, curBytes, c.sweepCycles.Load()
+	return c.hits.Load(), c.misses.Load(), c.evictions.Load(), entries, curBytes, c.expirations.Load()
 }
 
 // evictLocked 驱逐 LRU 尾部条目，调用方必须持有写锁。
