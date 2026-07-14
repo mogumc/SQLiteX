@@ -92,6 +92,7 @@ type Queue struct {
 	memExceeded  atomic.Bool
 	stopped      atomic.Bool
 	wg           sync.WaitGroup
+	memStop      chan struct{} // 通知 memMonitorLoop 立即退出
 }
 
 // Config 定义队列参数。
@@ -123,6 +124,7 @@ func New(cfg Config) *Queue {
 
 	// 后台异步内存监控：每隔 250ms 采样一次，避免 Submit 热路径中的 STW
 	if q.maxMem > 0 {
+		q.memStop = make(chan struct{})
 		q.wg.Add(1)
 		go q.memMonitorLoop()
 	}
@@ -132,16 +134,16 @@ func New(cfg Config) *Queue {
 
 // memMonitorLoop 后台定期采样内存，设置原子标志。
 // Submit 仅需检查原子变量，无需调用 runtime.ReadMemStats。
+// 通过 memStop channel 接收关闭信号，避免 Stop() 等待 ticker 超时。
 func (q *Queue) memMonitorLoop() {
 	defer q.wg.Done()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
+		case <-q.memStop:
+			return
 		case <-ticker.C:
-			if q.stopped.Load() {
-				return
-			}
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
 			q.memExceeded.Store(m.Alloc > q.maxMem)
@@ -176,6 +178,11 @@ func (q *Queue) Submit(op *WriteOp) error {
 func (q *Queue) Stop() {
 	if !q.stopped.CompareAndSwap(false, true) {
 		return
+	}
+
+	// 通知 memMonitorLoop 立即退出
+	if q.memStop != nil {
+		close(q.memStop)
 	}
 
 	// 排空缓冲区中已入队但未消费的操作
