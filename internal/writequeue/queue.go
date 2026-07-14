@@ -16,25 +16,33 @@ import (
 	"time"
 )
 
-// writeOpPool 复用 WriteOp 对象，减少 per-op 堆分配与 GC 压力。
+// writeOpPool 复用 WriteOp 结构体壳，减少 per-op struct 堆分配。
+// Done channel 不入池：每次 AcquireWriteOp 新建、ReleaseWriteOp 切断引用后由 GC 回收，
+// 避免 channel 作为 GC 根对象滞留在池中拖累读取性能。
 var writeOpPool = sync.Pool{
 	New: func() any {
-		return &WriteOp{Done: make(chan error, 1)}
+		return &WriteOp{}
 	},
 }
 
-// AcquireWriteOp 从池中获取或新建 WriteOp。
+// AcquireWriteOp 从池中获取 WriteOp 壳并新建 Done channel。
 // 调用方填充 Key/Value/Op 后通过 Submit 提交。
 func AcquireWriteOp() *WriteOp {
-	return writeOpPool.Get().(*WriteOp)
+	op := writeOpPool.Get().(*WriteOp)
+	op.Done = make(chan error, 1)
+	return op
 }
 
-// ReleaseWriteOp 将 WriteOp 归还池中。
-// Submit 路径在消费完成后自动调用此方法。
+// ReleaseWriteOp 归还 WriteOp 壳到池中。
+// 切断 Done channel 引用使其可被 GC，幂等（Done==nil 时直接返回）。
 func ReleaseWriteOp(op *WriteOp) {
+	if op.Done == nil {
+		return
+	}
 	op.Key = nil
 	op.Value = nil
 	op.Op = 0
+	op.Done = nil
 	writeOpPool.Put(op)
 }
 
