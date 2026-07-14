@@ -8,16 +8,19 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/mogumc/sqlitex/internal/writequeue"
+
+	tinylfu "github.com/mogumc/sqlitex/internal/cache"
 )
 
 // DB 是 SQLiteX 的核心句柄，持有底层 Pebble 引擎实例。
 // 调用方通过 Open 创建，通过 Close 释放，生命周期严格管理。
 type DB struct {
-	pebble *pebble.DB
-	cache  *pebble.Cache // 由 profileEdge 创建，Close 时释放
-	queue  *writequeue.Queue
-	cfg    Config
-	closed atomic.Bool
+	pebble   *pebble.DB
+	cache    *pebble.Cache       // Pebble block cache，Close 时释放
+	hotCache *tinylfu.TinyLFU    // TinyLFU 热点读缓存
+	queue    *writequeue.Queue
+	cfg      Config
+	closed   atomic.Bool
 }
 
 // Open 打开或创建指定目录下的 SQLiteX 数据库。
@@ -73,11 +76,26 @@ func Open(cfg Config) (*DB, error) {
 		},
 	})
 
+	// 初始化 TinyLFU 热点读缓存（CacheMaxMB=-1 禁用）
+	var hotCache *tinylfu.TinyLFU
+	if cfg.CacheMaxMB != -1 {
+		maxBytes := cfg.CacheMaxMB
+		if maxBytes <= 0 {
+			maxBytes = 10 // 默认 10MB
+		}
+		hotCache = tinylfu.New(tinylfu.Config{
+			MaxBytes:           int64(maxBytes) << 20,
+			MaxItemBytes:       1 << 20,
+			AdmissionThreshold: 2,
+		})
+	}
+
 	return &DB{
-		pebble: pdb,
-		cache:  cache,
-		queue:  q,
-		cfg:    cfg,
+		pebble:   pdb,
+		cache:    cache,
+		hotCache: hotCache,
+		queue:    q,
+		cfg:      cfg,
 	}, nil
 }
 
@@ -94,16 +112,27 @@ func (db *DB) Close() error {
 	return err
 }
 
-// Put 写入一个键值对。
+// CacheStats 返回 TinyLFU 缓存的运行指标。
+// 缓存禁用时返回全零。
+func (db *DB) CacheStats() (hits, misses, evictions, entries, curBytes int64) {
+	if db.hotCache == nil {
+		return 0, 0, 0, 0, 0
+	}
+	return db.hotCache.Stats()
+}
 // 底层通过 MPSC 队列执行，调用方阻塞等待写入完成。
-// 队列满或内存超限时返回 ErrWriteThrottled。
+// 写入后自动失效 TinyLFU 中对应 key 的缓存。
 func (db *DB) Put(key, value []byte) error {
-	return db.submit(key, value, writequeue.OpPut)
+	err := db.submit(key, value, writequeue.OpPut)
+	if err == nil && db.hotCache != nil {
+		db.hotCache.Delete(string(key))
+	}
+	return err
 }
 
 // Get 读取指定 Key 的值。
 // Key 不存在时返回 (nil, nil)，不视为错误。
-// Get 是同步操作，直接读取 Pebble 快照，不走队列。
+// TinyLFU 缓存命中时直接返回，零 Pebble 穿透。
 func (db *DB) Get(key []byte) ([]byte, error) {
 	if db.closed.Load() {
 		return nil, ErrDBClosed
@@ -111,6 +140,15 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, ErrInvalidKey
 	}
+
+	// TinyLFU 缓存查找
+	if db.hotCache != nil {
+		keyStr := string(key)
+		if val, ok := db.hotCache.Get(keyStr); ok {
+			return val, nil
+		}
+	}
+
 	val, closer, err := db.pebble.Get(key)
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
@@ -121,19 +159,34 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	result := make([]byte, len(val))
 	copy(result, val)
 	closer.Close()
+
+	// TinyLFU 记录访问并决定是否入缓存
+	if db.hotCache != nil {
+		keyStr := string(key)
+		if db.hotCache.Record(keyStr) {
+			cached := make([]byte, len(result))
+			copy(cached, result)
+			db.hotCache.Set(keyStr, cached)
+		}
+	}
+
 	return result, nil
 }
 
 // Delete 删除指定 Key。
 // Key 不存在时不返回错误（幂等语义）。
-// 底层通过 MPSC 队列执行。
+// 删除后自动失效 TinyLFU 中对应 key 的缓存。
 func (db *DB) Delete(key []byte) error {
-	return db.submit(key, nil, writequeue.OpDelete)
+	err := db.submit(key, nil, writequeue.OpDelete)
+	if err == nil && db.hotCache != nil {
+		db.hotCache.Delete(string(key))
+	}
+	return err
 }
 
 // PutSync 同步写入，绕过 MPSC 队列直接写入 Pebble。
 // 始终使用 pebble.Sync，不受 AsyncWAL 配置影响。
-// 仅用于特殊场景（如需要严格顺序保证的初始化写入）。
+// 写入后自动失效 TinyLFU 中对应 key 的缓存。
 func (db *DB) PutSync(key, value []byte) error {
 	if db.closed.Load() {
 		return ErrDBClosed
@@ -141,7 +194,11 @@ func (db *DB) PutSync(key, value []byte) error {
 	if len(key) == 0 {
 		return ErrInvalidKey
 	}
-	return db.pebble.Set(key, value, pebble.Sync)
+	err := db.pebble.Set(key, value, pebble.Sync)
+	if err == nil && db.hotCache != nil {
+		db.hotCache.Delete(string(key))
+	}
+	return err
 }
 
 // submit 统一的入队逻辑：从池获取 WriteOp → 填充 → 提交 → 等待结果。

@@ -53,6 +53,12 @@ type Config struct {
 	// 0 表示逐条写入（当前行为）。
 	// 推荐值：32-128，取决于写入量和延迟容忍度。
 	BatchCommitSize int
+
+	// CacheMaxMB TinyLFU 热点读缓存最大内存占用（MB）。
+	// ≤0 时使用默认值 10MB。显式设为 0 用默认。
+	// 设为 -1 禁用缓存。
+	// 推荐值：10-50MB，视热点数据量而定。
+	CacheMaxMB int
 }
 
 // applyDefaults 将零值填充为 ProfileEdge 预设。
