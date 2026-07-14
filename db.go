@@ -144,7 +144,9 @@ func (db *DB) PutSync(key, value []byte) error {
 	return db.pebble.Set(key, value, pebble.Sync)
 }
 
-// submit 统一的入队逻辑：校验 → 构造 WriteOp → 提交 → 等待结果。
+// submit 统一的入队逻辑：从池获取 WriteOp → 填充 → 提交 → 等待结果。
+// 通过 MPSC 队列将并发写入序列化，防止 Pebble 内部锁争用。
+// WriteOp 生命周期：AcquireWriteOp → Submit → 等 Done → ReleaseWriteOp（由调用者归还）。
 func (db *DB) submit(key, value []byte, opType writequeue.OpType) error {
 	if db.closed.Load() {
 		return ErrDBClosed
@@ -153,16 +155,18 @@ func (db *DB) submit(key, value []byte, opType writequeue.OpType) error {
 		return ErrInvalidKey
 	}
 
-	done := make(chan error, 1)
-	if err := db.queue.Submit(&writequeue.WriteOp{
-		Key:   key,
-		Value: value,
-		Op:    opType,
-		Done:  done,
-	}); err != nil {
+	op := writequeue.AcquireWriteOp()
+	op.Key = key
+	op.Value = value
+	op.Op = opType
+
+	if err := db.queue.Submit(op); err != nil {
+		writequeue.ReleaseWriteOp(op)
 		return ErrWriteThrottled
 	}
-	return <-done
+	err := <-op.Done
+	writequeue.ReleaseWriteOp(op) // 调用者归还：此时 Done channel 已排空，安全放回池
+	return err
 }
 
 // pebblePutter 实现 writequeue.Putter 和 writequeue.BatchPutter 接口，

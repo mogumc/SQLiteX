@@ -3,8 +3,9 @@
 // 设计目标：
 // - 多生产者单消费者模型，后台单 Goroutine 消费
 // - 队列满或内存超限时快速失败，返回哨兵错误
-// - 通过 runtime.MemStats 监控全局内存水位，防止 OOM
+// - 通过 runtime.MemStats 监控全局内存水位（后台采样，避免热路径 STW）
 // - 可选组提交（BatchSize>0），合并多次写入为单次 Batch 提交
+// - sync.Pool 复用 WriteOp 减少 GC 压力
 package writequeue
 
 import (
@@ -12,7 +13,30 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// writeOpPool 复用 WriteOp 对象，减少 per-op 堆分配与 GC 压力。
+var writeOpPool = sync.Pool{
+	New: func() any {
+		return &WriteOp{Done: make(chan error, 1)}
+	},
+}
+
+// AcquireWriteOp 从池中获取或新建 WriteOp。
+// 调用方填充 Key/Value/Op 后通过 Submit 提交。
+func AcquireWriteOp() *WriteOp {
+	return writeOpPool.Get().(*WriteOp)
+}
+
+// ReleaseWriteOp 将 WriteOp 归还池中。
+// Submit 路径在消费完成后自动调用此方法。
+func ReleaseWriteOp(op *WriteOp) {
+	op.Key = nil
+	op.Value = nil
+	op.Op = 0
+	writeOpPool.Put(op)
+}
 
 // 哨兵错误：调用方通过 errors.Is 匹配，禁止字符串比较。
 var (
@@ -63,10 +87,11 @@ type BatchPutter interface {
 type Queue struct {
 	queue     chan *WriteOp
 	putter    Putter
-	batchSize int // 组提交批量大小，0=逐条消费
-	maxMem    uint64
-	stopped   atomic.Bool
-	wg        sync.WaitGroup
+	batchSize    int    // 组提交批量大小，0=逐条消费
+	maxMem       uint64 // 内存软上限（字节），0=不启用
+	memExceeded  atomic.Bool
+	stopped      atomic.Bool
+	wg           sync.WaitGroup
 }
 
 // Config 定义队列参数。
@@ -95,23 +120,46 @@ func New(cfg Config) *Queue {
 	} else {
 		go q.consumeLoop()
 	}
+
+	// 后台异步内存监控：每隔 250ms 采样一次，避免 Submit 热路径中的 STW
+	if q.maxMem > 0 {
+		q.wg.Add(1)
+		go q.memMonitorLoop()
+	}
+
 	return q
+}
+
+// memMonitorLoop 后台定期采样内存，设置原子标志。
+// Submit 仅需检查原子变量，无需调用 runtime.ReadMemStats。
+func (q *Queue) memMonitorLoop() {
+	defer q.wg.Done()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if q.stopped.Load() {
+				return
+			}
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			q.memExceeded.Store(m.Alloc > q.maxMem)
+		}
+	}
 }
 
 // Submit 提交一个写操作，同步等待消费完成。
 // 队列满时返回 ErrFull，内存超限时返回 ErrMemExceeded，
 // 队列已停止时返回 ErrStopped。
+// 注意：WriteOp 在消费完成后自动通过 ReleaseWriteOp 归还池。
 func (q *Queue) Submit(op *WriteOp) error {
 	if q.stopped.Load() {
 		return ErrStopped
 	}
 
-	if q.maxMem > 0 {
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		if m.Alloc > q.maxMem {
-			return ErrMemExceeded
-		}
+	if q.memExceeded.Load() {
+		return ErrMemExceeded
 	}
 
 	select {
@@ -145,6 +193,7 @@ drained:
 }
 
 // consumeLoop 逐条消费队列（BatchSize==0 时使用）。
+// 仅负责执行写入和通知结果，WriteOp 由调用方 submit() 归还池。
 func (q *Queue) consumeLoop() {
 	defer q.wg.Done()
 	for op := range q.queue {
