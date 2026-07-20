@@ -126,7 +126,7 @@ func mergeCodeSections(pkgName string, sections []string) string {
 	if len(importSet) > 0 {
 		buf.WriteString("import (\n")
 		for imp := range importSet {
-			buf.WriteString("\t\"" + imp + "\"\n")
+			buf.WriteString("\t" + imp + "\n")
 		}
 		buf.WriteString(")\n\n")
 	}
@@ -183,10 +183,10 @@ func extractImports(code string) ([]string, string) {
 				i++
 				break
 			}
-			// 移除引号
-			line = strings.Trim(line, "\"\t ")
-			if line != "" {
-				imports = append(imports, line)
+			// 保留完整的 import 行（含别名和引号），仅去掉首尾空格
+			impLine := strings.TrimSpace(line)
+			if impLine != "" {
+				imports = append(imports, impLine)
 			}
 			i++
 		}

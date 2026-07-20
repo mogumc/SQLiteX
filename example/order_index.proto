@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package example;
+
+option go_package = "github.com/mogumc/sqlitex/example/order_index";
+
+import "sqlitex/options.proto";
+
+message Order {
+  option (sqlitex.table).primary_key = "id";
+
+  int64 id = 1 [(sqlitex.field).primary_key = true];
+  string user_id = 2 [(sqlitex.field).index = INDEX_NORMAL];
+  int64 status = 3 [(sqlitex.field).index = INDEX_NORMAL];
+  int64 amount = 4;
+  int64 created_at = 5;
+}

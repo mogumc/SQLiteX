@@ -45,7 +45,7 @@ func TestGenerateQuery(t *testing.T) {
 		"func (q *UserQuery) WhereScore(",
 		"func (q *UserQuery) WhereActive(",
 		"func (q *UserQuery) Limit(n int) *UserQuery",
-		"func (q *UserQuery) Offset(n int) *UserQuery",
+		"func (q *UserQuery) AfterKey(lastKey []byte) *UserQuery",
 		"func (q *UserQuery) Exec() ([]*User, error)",
 		"func (q *UserQuery) First() (*User, error)",
 		"func (q *UserQuery) Count() (int, error)",

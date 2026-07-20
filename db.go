@@ -211,6 +211,55 @@ func (db *DB) PutSync(key, value []byte) error {
 	return err
 }
 
+// KVPair 表示 WriteBatch 中的一个键值操作。
+type KVPair struct {
+	Key    []byte
+	Value  []byte
+	Delete bool // true=删除操作
+}
+
+// WriteBatch 原子批量写入多个键值操作。
+// 通过 Pebble Batch 保证原子性，适用于需要并发安全的多 Key 写入场景（如主数据+索引）。
+// AsyncWAL 配置决定使用 Sync 还是 NoSync 提交。
+func (db *DB) WriteBatch(ops []KVPair) error {
+	if db.closed.Load() {
+		return ErrDBClosed
+	}
+	batch := db.pebble.NewBatch()
+	defer batch.Close()
+
+	writeOpts := pebble.Sync
+	if db.cfg.AsyncWAL {
+		writeOpts = pebble.NoSync
+	}
+
+	for _, op := range ops {
+		if len(op.Key) == 0 {
+			return ErrInvalidKey
+		}
+		if op.Delete {
+			if err := batch.Delete(op.Key, writeOpts); err != nil {
+				return err
+			}
+		} else {
+			if err := batch.Set(op.Key, op.Value, writeOpts); err != nil {
+				return err
+			}
+		}
+	}
+	if err := batch.Commit(writeOpts); err != nil {
+		return err
+	}
+
+	// 失效缓存
+	if db.hotCache != nil {
+		for _, op := range ops {
+			db.hotCache.Delete(string(op.Key))
+		}
+	}
+	return nil
+}
+
 // submit 统一的入队逻辑：从池获取 WriteOp → 填充 → 提交 → 等待结果。
 // 通过 MPSC 队列将并发写入序列化，防止 Pebble 内部锁争用。
 // WriteOp 生命周期：AcquireWriteOp → Submit → 等 Done → ReleaseWriteOp（由调用者归还）。
@@ -323,6 +372,18 @@ func (it *PrefixIterator) Value() []byte {
 // Close 释放迭代器资源。
 func (it *PrefixIterator) Close() error {
 	return it.iter.Close()
+}
+
+// Seek 将迭代器定位到第一个 ≥ target 的 Key。
+func (it *PrefixIterator) Seek(target []byte) {
+	it.started = true
+	it.iter.SeekGE(target)
+}
+
+// SeekLT 将迭代器定位到最后一个 < target 的 Key，配合 Next 实现游标分页。
+func (it *PrefixIterator) SeekLT(target []byte) {
+	it.started = true
+	it.iter.SeekLT(target)
 }
 
 // Iterate 创建一个前缀迭代器，用于按 Key 顺序扫描指定前缀的所有记录。

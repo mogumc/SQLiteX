@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package example;
+
+option go_package = "github.com/mogumc/sqlitex/example/indexed";
+
+import "sqlitex/options.proto";
+
+message IndexedUser {
+  option (sqlitex.table).primary_key = "id";
+  option (sqlitex.table).compress_threshold = 256;
+
+  int64 id = 1 [(sqlitex.field).primary_key = true];
+  string name = 2;
+  string email = 3 [(sqlitex.field).index = INDEX_UNIQUE];
+  bytes avatar = 4 [(sqlitex.field).compress = true];
+  int64 age = 5 [(sqlitex.field).index = INDEX_NORMAL];
+  bool active = 6;
+}
