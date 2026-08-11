@@ -23,14 +23,14 @@ func main() {
 
 	store := generated.NewUserStore(db)
 
-	fmt.Println("=== SQLiteX CRUD Demo ===\n")
+	fmt.Println("=== SQLiteX CRUD Demo ===")
 
 	// Create
 	fmt.Println("[Create]")
 	store.Create(&generated.User{Id: 1, Name: "Alice", Email: "alice@test.com", Active: true})
 	store.Create(&generated.User{Id: 2, Name: "Bob", Email: "bob@test.com", Active: false})
 	store.Create(&generated.User{Id: 3, Name: "Charlie", Email: "charlie@test.com", Active: true})
-	fmt.Println("  3 rows inserted\n")
+	fmt.Println("  3 rows inserted")
 
 	// Get
 	fmt.Println("[Get] id=1")

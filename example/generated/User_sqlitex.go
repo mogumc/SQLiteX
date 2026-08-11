@@ -4,24 +4,45 @@
 package generated
 
 import (
-	"github.com/mogumc/sqlitex/internal/encoding"
 	"sync"
 	"encoding/binary"
 	"fmt"
 	"math"
+	zstd "github.com/klauspost/compress/zstd"
 	"github.com/mogumc/sqlitex"
+	"github.com/mogumc/sqlitex/internal/encoding"
+	"strings"
 )
 
+
+var (
+	_zstdEnc *zstd.Encoder
+	_zstdDec *zstd.Decoder
+)
+
+func init() {
+	var err error
+	_zstdEnc, err = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	if err != nil { panic(err) }
+	_zstdDec, err = zstd.NewReader(nil, zstd.WithDecoderConcurrency(0))
+	if err != nil { panic(err) }
+}
+
+func _compressZstd(src []byte) []byte {
+	return _zstdEnc.EncodeAll(src, nil)
+}
+
+func _decompressZstd(src []byte) ([]byte, error) {
+	return _zstdDec.DecodeAll(src, nil)
+}
 
 var _ = math.Float32bits
 
 // Serialize 将 User 序列化为字节切片。
-// 固定长度字段使用 binary.LittleEndian 直接映射，变长字段使用 uint32 长度前缀。
 func (m *User) Serialize() []byte {
 	size := m.Size()
 	buf := make([]byte, size)
 	off := 0
-	// Id (fixed 8B)
 	binary.LittleEndian.PutUint64(buf[off:], uint64(m.Id))
 	off += 8
 	// Name (varlen): uint32 length prefix + data
@@ -34,7 +55,6 @@ func (m *User) Serialize() []byte {
 	off += 4
 	copy(buf[off:], m.Email)
 	off += len(m.Email)
-	// CreatedAt (fixed 8B)
 	binary.LittleEndian.PutUint64(buf[off:], uint64(m.CreatedAt))
 	off += 8
 	// Active (fixed 1B)
@@ -44,19 +64,35 @@ func (m *User) Serialize() []byte {
 		buf[off] = 0
 	}
 	off += 1
+	// Bio (compressible varlen): [uint32 dataLen][uint32 originalLen][data]
+	raw := []byte(m.Bio)
+	compressed := _compressZstd(raw)
+	if len(compressed) < len(raw) {
+		binary.LittleEndian.PutUint32(buf[off:], uint32(len(compressed)))
+		off += 4
+		binary.LittleEndian.PutUint32(buf[off:], uint32(len(raw)))
+		off += 4
+		copy(buf[off:], compressed)
+		off += len(compressed)
+	} else {
+		binary.LittleEndian.PutUint32(buf[off:], uint32(len(raw)))
+		off += 4
+		binary.LittleEndian.PutUint32(buf[off:], uint32(len(raw)))
+		off += 4
+		copy(buf[off:], raw)
+		off += len(raw)
+	}
 	return buf
 }
 
 // DeserializeUser 从字节切片反序列化为 User。
-// 零反射，直接通过 binary.LittleEndian 读取。
 func DeserializeUser(data []byte) (*User, error) {
-	if len(data) < 17 {
-		return nil, fmt.Errorf("sqlitex: User data too short: %d < 17", len(data))
+	if len(data) < 25 {
+		return nil, fmt.Errorf("sqlitex: User data too short: %d < 25", len(data))
 	}
 	m := &User{}
 	off := 0
 	var vLen int
-	// Id (fixed 8B)
 	if off+8 > len(data) {
 		return nil, fmt.Errorf("sqlitex: User.Id truncated")
 	}
@@ -84,43 +120,54 @@ func DeserializeUser(data []byte) (*User, error) {
 	}
 	m.Email = string(data[off:off+vLen])
 	off += vLen
-	// CreatedAt (fixed 8B)
 	if off+8 > len(data) {
 		return nil, fmt.Errorf("sqlitex: User.CreatedAt truncated")
 	}
 	m.CreatedAt = int64(binary.LittleEndian.Uint64(data[off:]))
 	off += 8
-	// Active (fixed 1B)
 	if off+1 > len(data) {
 		return nil, fmt.Errorf("sqlitex: User.Active truncated")
 	}
 	m.Active = data[off] != 0
 	off += 1
+	// Bio (compressible varlen)
+	if off+8 > len(data) {
+		return nil, fmt.Errorf("sqlitex: User.Bio truncated")
+	}
+	vLen = int(binary.LittleEndian.Uint32(data[off:]))
+	origLen := int(binary.LittleEndian.Uint32(data[off+4:]))
+	off += 8
+	if off+vLen > len(data) {
+		return nil, fmt.Errorf("sqlitex: User.Bio data truncated: need %d, have %d", vLen, len(data)-off)
+	}
+	if vLen == origLen {
+		m.Bio = string(data[off:off+vLen])
+	} else {
+		dec, err := _decompressZstd(data[off:off+vLen])
+		if err != nil {
+			return nil, fmt.Errorf("sqlitex: User.Bio zstd decompress: %w", err)
+		}
+		m.Bio = string(dec)
+	}
+	off += vLen
 	return m, nil
 }
 
-// Size 返回序列化后的精确字节数。
+// Size 返回序列化所需的缓冲区大小（上限估计）。
 func (m *User) Size() int {
-	size := 17
+	size := 25
 	size += 4 + len(m.Name)
 	size += 4 + len(m.Email)
+	size += 4 + len(m.Bio)
 	return size
 }
 
 
 // UserStore 是 User 的强类型存储接口。
 type UserStore interface {
-	// Create 创建新的 User 记录。
 	Create(m *User) error
-
-	// Update 更新已存在的 User 记录。
 	Update(m *User) error
-
-	// Delete 删除指定主键的 User 记录。
 	Delete(Id int64) error
-
-	// Get 根据主键查询 User 记录。
-	// 记录不存在时返回 (nil, nil)。
 	Get(Id int64) (*User, error)
 }
 
@@ -132,44 +179,92 @@ type userStore struct {
 
 // NewUserStore 创建 UserStore 实例。
 func NewUserStore(db *sqlitex.DB) UserStore {
-	return &userStore{
-		db:      db,
-		tableID: 1,
-	}
+	return &userStore{db: db, tableID: 1}
 }
 
 // Create 创建新的 User 记录。
+// 通过 WriteBatch 原子写入主数据行 + 所有二级索引。
 func (s *userStore) Create(m *User) error {
 	if m == nil {
 		return fmt.Errorf("sqlitex: cannot create nil User")
 	}
 	
 	pkBytes := encodeUserPrimaryKey(m.Id)
-	key := encoding.EncodeKey(s.tableID, pkBytes)
+	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
 	value := m.Serialize()
 	
-	return s.db.Put(key, value)
+	ops := make([]sqlitex.KVPair, 0, 1+2)
+	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
+	ops = append(ops, sqlitex.KVPair{
+		Key:   encoding.EncodeIndexKey(s.tableID, 3, encodeUserIndexEmailValue(m.Email), pkBytes),
+		Value: pkBytes,
+	})
+	ops = append(ops, sqlitex.KVPair{
+		Key:   encoding.EncodeIndexKey(s.tableID, 4, encodeUserIndexCreatedAtValue(m.CreatedAt), pkBytes),
+		Value: pkBytes,
+	})
+	return s.db.WriteBatch(ops)
 }
 
 // Update 更新已存在的 User 记录。
+// 先 Get 旧值删除旧索引，再原子写入新数据+新索引。
 func (s *userStore) Update(m *User) error {
 	if m == nil {
 		return fmt.Errorf("sqlitex: cannot update nil User")
 	}
 	
 	pkBytes := encodeUserPrimaryKey(m.Id)
-	key := encoding.EncodeKey(s.tableID, pkBytes)
+	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
 	value := m.Serialize()
 	
-	return s.db.Put(key, value)
+	ops := make([]sqlitex.KVPair, 0, 1+2*2)
+	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
+	
+	// 获取旧值，删除旧索引条目
+	old, _ := s.Get(m.Id)
+	if old != nil {
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeIndexKey(s.tableID, 3, encodeUserIndexEmailValue(old.Email), pkBytes),
+			Delete: true,
+		})
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeIndexKey(s.tableID, 4, encodeUserIndexCreatedAtValue(old.CreatedAt), pkBytes),
+			Delete: true,
+		})
+	}
+	ops = append(ops, sqlitex.KVPair{
+		Key:   encoding.EncodeIndexKey(s.tableID, 3, encodeUserIndexEmailValue(m.Email), pkBytes),
+		Value: pkBytes,
+	})
+	ops = append(ops, sqlitex.KVPair{
+		Key:   encoding.EncodeIndexKey(s.tableID, 4, encodeUserIndexCreatedAtValue(m.CreatedAt), pkBytes),
+		Value: pkBytes,
+	})
+	return s.db.WriteBatch(ops)
 }
 
-// Delete 删除指定主键的 User 记录。
+// Delete 删除指定主键的 User 记录及其所有索引。
+// 先 Get 获取旧值以构造正确的索引 Key，再原子删除。
 func (s *userStore) Delete(Id int64) error {
 	pkBytes := encodeUserPrimaryKey(Id)
-	key := encoding.EncodeKey(s.tableID, pkBytes)
+	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
 	
-	return s.db.Delete(key)
+	ops := make([]sqlitex.KVPair, 0, 1+2)
+	ops = append(ops, sqlitex.KVPair{Key: dataKey, Delete: true})
+	
+	// 获取旧值以确定要删除的索引 Key
+	old, _ := s.Get(Id)
+	if old != nil {
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeIndexKey(s.tableID, 3, encodeUserIndexEmailValue(old.Email), pkBytes),
+			Delete: true,
+		})
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeIndexKey(s.tableID, 4, encodeUserIndexCreatedAtValue(old.CreatedAt), pkBytes),
+			Delete: true,
+		})
+	}
+	return s.db.WriteBatch(ops)
 }
 
 // Get 根据主键查询 User 记录。
@@ -182,9 +277,8 @@ func (s *userStore) Get(Id int64) (*User, error) {
 		return nil, fmt.Errorf("sqlitex: get User: %w", err)
 	}
 	if value == nil {
-		return nil, nil // 记录不存在
+		return nil, nil
 	}
-	
 	return DeserializeUser(value)
 }
 
@@ -194,162 +288,148 @@ func encodeUserPrimaryKey(Id int64) []byte {
 	binary.LittleEndian.PutUint64(buf, uint64(Id))
 	return buf
 }
+func encodeUserIndexEmailValue(v string) []byte { return []byte(v) }
+func encodeUserIndexCreatedAtValue(v int64) []byte { buf := make([]byte, 8); binary.LittleEndian.PutUint64(buf, uint64(v)); return buf }
 
 
-// UserQuery 提供链式查询构建器。
 type UserQuery struct {
-	db     *sqlitex.DB
-	where  []string
-	args   []interface{}
-	limit  int
-	offset int
+	db      *sqlitex.DB
+	where   []string
+	args    []interface{}
+	limit   int
+	lastKey []byte
 }
 
-// NewUserQuery 创建查询构建器实例。
 func NewUserQuery(db *sqlitex.DB) *UserQuery {
-	return &UserQuery{
-		db:    db,
-		where: make([]string, 0),
-		args:  make([]interface{}, 0),
-	}
+	return &UserQuery{db: db, where: make([]string, 0), args: make([]interface{}, 0)}
 }
 
 
-// WhereName 添加 Name 字段条件。
 func (q *UserQuery) WhereName(op string, value string) *UserQuery {
 	q.where = append(q.where, "Name " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
-// WhereEmail 添加 Email 字段条件。
 func (q *UserQuery) WhereEmail(op string, value string) *UserQuery {
 	q.where = append(q.where, "Email " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
-// WhereCreatedAt 添加 CreatedAt 字段条件。
 func (q *UserQuery) WhereCreatedAt(op string, value int64) *UserQuery {
 	q.where = append(q.where, "CreatedAt " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
-// WhereActive 添加 Active 字段条件。
 func (q *UserQuery) WhereActive(op string, value bool) *UserQuery {
 	q.where = append(q.where, "Active " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
-
-// Limit 设置返回结果数量限制。
-func (q *UserQuery) Limit(n int) *UserQuery {
-	q.limit = n
+func (q *UserQuery) WhereBio(op string, value string) *UserQuery {
+	q.where = append(q.where, "Bio " + op + " ?")
+	q.args = append(q.args, value)
 	return q
 }
 
-// Offset 设置结果偏移量。
-func (q *UserQuery) Offset(n int) *UserQuery {
-	q.offset = n
-	return q
-}
 
-// Exec 扫描全表前缀，反序列化后应用过滤条件，返回匹配结果。
+func (q *UserQuery) Limit(n int) *UserQuery { q.limit = n; return q }
+func (q *UserQuery) AfterKey(lastKey []byte) *UserQuery { q.lastKey = lastKey; return q }
 func (q *UserQuery) Exec() ([]*User, error) {
-	// 构造表前缀
-	prefix := encoding.EncodeKey(1, nil)
+	if len(q.where) > 0 {
+		parts := splitWhere(q.where[0])
+		if len(parts) == 2 && parts[0] == "Email" && parts[1] == "=" {
+			return q.execIndexed()
+		}
+	}
+	return q.execFullScan()
+}
 
-	// 扫描所有记录
-	var results []*User
+func (q *UserQuery) execIndexed() ([]*User, error) {
+	val := q.args[0]
+	var fieldValue []byte
+	fieldValue = []byte(val.(string))
+	prefix := encoding.EncodeIndexPrefix(1, 3, fieldValue)
 	iter := q.db.Iterate(prefix)
-	if iter == nil {
-		return nil, nil
-	}
+	if iter == nil { return nil, nil }
 	defer iter.Close()
+	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
 
+	var results []*User
 	for iter.Next() {
-		_ = iter.Key()
-		value := iter.Value()
+		pkBytes := iter.Value()
+		dataKey := encoding.EncodeKey(1, pkBytes)
+		value, err := q.db.Get(dataKey)
+		if err != nil || value == nil { continue }
 		m, err := DeserializeUser(value)
-		if err != nil {
-			continue // 跳过损坏数据
-		}
-		if q.matchWhere(m) {
-			results = append(results, m)
-		}
+		if err != nil { continue }
+		if len(q.where) > 1 && !q.matchWhereTail(m) { continue }
+		results = append(results, m)
+		if q.limit > 0 && len(results) >= q.limit { break }
 	}
-
-	// 应用 offset
-	if q.offset > 0 {
-		if q.offset >= len(results) {
-			return []*User{}, nil
-		}
-		results = results[q.offset:]
-	}
-
-	// 应用 limit
-	if q.limit > 0 && q.limit < len(results) {
-		results = results[:q.limit]
-	}
-
 	return results, nil
 }
 
-// First 执行查询并返回第一条结果。
+func (q *UserQuery) execFullScan() ([]*User, error) {
+	prefix := encoding.EncodeKey(1, nil)
+	iter := q.db.Iterate(prefix)
+	if iter == nil { return nil, nil }
+	defer iter.Close()
+	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
+
+	var results []*User
+	for iter.Next() {
+		value := iter.Value()
+		m, err := DeserializeUser(value)
+		if err != nil { continue }
+		if q.matchWhere(m) {
+			results = append(results, m)
+			if q.limit > 0 && len(results) >= q.limit { break }
+		}
+	}
+	return results, nil
+}
+
 func (q *UserQuery) First() (*User, error) {
-	q.limit = 1
-	results, err := q.Exec()
-	if err != nil {
-		return nil, err
-	}
-	if len(results) == 0 {
-		return nil, nil
-	}
-	return results[0], nil
+	q.limit = 1; r, e := q.Exec(); if e != nil { return nil, e }
+	if len(r) == 0 { return nil, nil }; return r[0], nil
 }
-
-// Count 执行查询并返回结果数量。
 func (q *UserQuery) Count() (int, error) {
-	results, err := q.Exec()
-	if err != nil {
-		return 0, err
-	}
-	return len(results), nil
+	r, e := q.Exec(); if e != nil { return 0, e }; return len(r), nil
 }
 
-// matchWhere 检查记录是否满足所有 where 条件。
 func (q *UserQuery) matchWhere(item *User) bool {
 	for _, cond := range q.where {
-		// 解析条件字符串 "FieldName op ?"
 		parts := splitWhere(cond)
-		if len(parts) != 2 {
-			continue
-		}
+		if len(parts) != 2 { continue }
 		field, op := parts[0], parts[1]
-
 		switch field {
+		case "Name": if !q.compareName(item.Name, op) { return false }
+		case "Email": if !q.compareEmail(item.Email, op) { return false }
+		case "CreatedAt": if !q.compareCreatedAt(item.CreatedAt, op) { return false }
+		case "Active": if !q.compareActive(item.Active, op) { return false }
+		case "Bio": if !q.compareBio(item.Bio, op) { return false }
 		
-		case "Name":
-			if !q.compareName(item.Name, op) {
-				return false
-			}
-		
-		case "Email":
-			if !q.compareEmail(item.Email, op) {
-				return false
-			}
-		
-		case "CreatedAt":
-			if !q.compareCreatedAt(item.CreatedAt, op) {
-				return false
-			}
-		
-		case "Active":
-			if !q.compareActive(item.Active, op) {
-				return false
-			}
+		}
+	}
+	return true
+}
+
+func (q *UserQuery) matchWhereTail(item *User) bool {
+	for i, cond := range q.where {
+		if i == 0 { continue }
+		parts := splitWhere(cond)
+		if len(parts) != 2 { continue }
+		field, op := parts[0], parts[1]
+		switch field {
+		case "Name": if !q.compareName(item.Name, op) { return false }
+		case "Email": if !q.compareEmail(item.Email, op) { return false }
+		case "CreatedAt": if !q.compareCreatedAt(item.CreatedAt, op) { return false }
+		case "Active": if !q.compareActive(item.Active, op) { return false }
+		case "Bio": if !q.compareBio(item.Bio, op) { return false }
 		
 		}
 	}
@@ -357,154 +437,85 @@ func (q *UserQuery) matchWhere(item *User) bool {
 }
 
 
-// compareName 比较 Name 字段值。
 func (q *UserQuery) compareName(actual string, op string) bool {
-	// 根据 where 顺序找到对应 args
 	targetIdx := -1
 	
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "Name" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Name" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(string)
-
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	
-	case "LIKE":
-		return false // Phase 2: strings.Contains
-	
-	
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case "LIKE": return strings.Contains(actual, expected)
 	}
 	return false
 }
 
-// compareEmail 比较 Email 字段值。
 func (q *UserQuery) compareEmail(actual string, op string) bool {
-	// 根据 where 顺序找到对应 args
 	targetIdx := -1
 	
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "Email" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Email" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(string)
-
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	
-	case "LIKE":
-		return false // Phase 2: strings.Contains
-	
-	
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case "LIKE": return strings.Contains(actual, expected)
 	}
 	return false
 }
 
-// compareCreatedAt 比较 CreatedAt 字段值。
 func (q *UserQuery) compareCreatedAt(actual int64, op string) bool {
-	// 根据 where 顺序找到对应 args
 	targetIdx := -1
 	
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "CreatedAt" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "CreatedAt" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(int64)
-
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	
-	
-	case ">":
-		return actual > expected
-	case "<":
-		return actual < expected
-	case ">=":
-		return actual >= expected
-	case "<=":
-		return actual <= expected
-	
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case ">":  return actual > expected
+	case "<":  return actual < expected
+	case ">=": return actual >= expected
+	case "<=": return actual <= expected
 	}
 	return false
 }
 
-// compareActive 比较 Active 字段值。
 func (q *UserQuery) compareActive(actual bool, op string) bool {
-	// 根据 where 顺序找到对应 args
 	targetIdx := -1
 	
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "Active" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Active" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(bool)
-
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	}
+	return false
+}
+
+func (q *UserQuery) compareBio(actual string, op string) bool {
+	targetIdx := -1
 	
-	
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Bio" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
+	expected := q.args[targetIdx].(string)
+	switch op {
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case "LIKE": return strings.Contains(actual, expected)
 	}
 	return false
 }
 
 
-// splitWhere 简单切分条件字符串 "FieldName op ?" → ["FieldName", "op"]
 func splitWhere(cond string) []string {
-	// 从末尾跳过 " ?" 部分
 	lastSpace := -1
-	for i := len(cond) - 1; i >= 0; i-- {
-		if cond[i] == ' ' {
-			lastSpace = i
-			break
-		}
-	}
-	if lastSpace < 0 {
-		return nil
-	}
-	// cond[:lastSpace] = "FieldName op"
+	for i := len(cond) - 1; i >= 0; i-- { if cond[i] == ' ' { lastSpace = i; break } }
+	if lastSpace < 0 { return nil }
 	inner := cond[:lastSpace]
-	for i := len(inner) - 1; i >= 0; i-- {
-		if inner[i] == ' ' {
-			return []string{inner[:i], inner[i+1:]}
-		}
-	}
+	for i := len(inner) - 1; i >= 0; i-- { if inner[i] == ' ' { return []string{inner[:i], inner[i+1:]} } }
 	return nil
 }
 

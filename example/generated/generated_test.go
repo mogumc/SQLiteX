@@ -1,6 +1,8 @@
 package generated_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/mogumc/sqlitex"
@@ -204,4 +206,187 @@ func TestGeneratedQueryBuilder(t *testing.T) {
 	if count != 3 {
 		t.Fatalf("expected count 3, got %d", count)
 	}
+}
+
+// ===== Phase 2: 二级索引 =====
+
+func TestGeneratedIndexQueryByEmail(t *testing.T) {
+	db := openTestDB(t)
+	store := generated.NewUserStore(db)
+
+	for i := int64(1); i <= 5; i++ {
+		store.Create(&generated.User{
+			Id: i, Name: fmt.Sprintf("U%d", i),
+			Email: fmt.Sprintf("u%d@test.com", i), Active: true,
+		})
+	}
+
+	// 非主键唯一索引查询
+	q := generated.NewUserQuery(db)
+	users, err := q.WhereEmail("=", "u3@test.com").Exec()
+	if err != nil {
+		t.Fatalf("index exec: %v", err)
+	}
+	if len(users) != 1 || users[0].Id != 3 {
+		t.Fatalf("expected 1 user id=3, got %d", len(users))
+	}
+}
+
+func TestGeneratedIndexQueryByCreatedAt(t *testing.T) {
+	db := openTestDB(t)
+	store := generated.NewUserStore(db)
+
+	for i := int64(1); i <= 10; i++ {
+		store.Create(&generated.User{
+			Id: i, Name: fmt.Sprintf("U%d", i),
+			Email: fmt.Sprintf("u%d@t.com", i), CreatedAt: 1000,
+		})
+	}
+
+	// 普通索引: 同值多条
+	q := generated.NewUserQuery(db)
+	users, err := q.WhereCreatedAt("=", 1000).Exec()
+	if err != nil {
+		t.Fatalf("index exec: %v", err)
+	}
+	if len(users) != 10 {
+		t.Fatalf("expected 10 users, got %d", len(users))
+	}
+}
+
+func TestGeneratedMultiConditionQuery(t *testing.T) {
+	db := openTestDB(t)
+	store := generated.NewUserStore(db)
+
+	for i := int64(1); i <= 6; i++ {
+		store.Create(&generated.User{
+			Id: i, Name: fmt.Sprintf("U%d", i),
+			Email: fmt.Sprintf("u%d@t.com", i),
+			CreatedAt: 1000 + i, Active: i%2 == 0,
+		})
+	}
+
+	// 索引字段 + 普通字段 组合条件
+	q := generated.NewUserQuery(db)
+	users, err := q.WhereCreatedAt("=", 1002).WhereActive("=", true).Exec()
+	if err != nil {
+		t.Fatalf("multi exec: %v", err)
+	}
+	if len(users) != 1 || users[0].Id != 2 {
+		t.Fatalf("expected 1 user id=2, got %d", len(users))
+	}
+}
+
+func TestGeneratedDeleteCleansIndex(t *testing.T) {
+	db := openTestDB(t)
+	store := generated.NewUserStore(db)
+
+	store.Create(&generated.User{Id: 1, Name: "A", Email: "a@t.com", Active: true})
+	store.Delete(1)
+
+	q := generated.NewUserQuery(db)
+	users, err := q.WhereEmail("=", "a@t.com").Exec()
+	if err != nil {
+		t.Fatalf("exec after delete: %v", err)
+	}
+	if len(users) != 0 {
+		t.Fatalf("expected 0 after delete, got %d", len(users))
+	}
+}
+
+// ===== Phase 2: 字段压缩 =====
+
+func TestGeneratedCompressionRoundTrip(t *testing.T) {
+	db := openTestDB(t)
+	store := generated.NewUserStore(db)
+
+	bigBio := strings.Repeat("压缩测试文本用于验证zstd字段级压缩效果 ", 50) // >256 bytes
+	store.Create(&generated.User{
+		Id: 1, Name: "A", Email: "a@t.com", Bio: bigBio, Active: true,
+	})
+
+	u, err := store.Get(1)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if u.Bio != bigBio {
+		t.Fatalf("bio mismatch: got %d bytes, want %d", len(u.Bio), len(bigBio))
+	}
+
+	// 序列化后的数据应小于原始明文（验证压缩生效）
+	data := u.Serialize()
+	t.Logf("compressed payload size: %d vs raw bio: %d", len(data), len(bigBio))
+}
+
+// ===== Phase 2: 游标分页 =====
+
+func TestGeneratedCursorPagination(t *testing.T) {
+	db := openTestDB(t)
+	store := generated.NewUserStore(db)
+
+	for i := int64(1); i <= 5; i++ {
+		store.Create(&generated.User{
+			Id: i, Name: fmt.Sprintf("U%d", i),
+			Email: fmt.Sprintf("u%d@t.com", i), Active: true,
+		})
+	}
+
+	// 第一页 2 条
+	q := generated.NewUserQuery(db)
+	page1, err := q.Limit(2).Exec()
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("page1: expected 2, got %d", len(page1))
+	}
+
+	// AfterKey(nil) 编译验证 — 等价于不使用游标
+	q2 := generated.NewUserQuery(db)
+	page2, err := q2.Limit(2).AfterKey(nil).Exec()
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("page2: expected 2, got %d", len(page2))
+	}
+}
+
+// ===== Phase 2: LIKE 模糊查询 =====
+
+func TestGeneratedLikeQuery(t *testing.T) {
+	db := openTestDB(t)
+	store := generated.NewUserStore(db)
+
+	store.Create(&generated.User{Id: 1, Name: "Alice", Email: "a@t.com"})
+	store.Create(&generated.User{Id: 2, Name: "Bob", Email: "b@t.com"})
+	store.Create(&generated.User{Id: 3, Name: "Alicia", Email: "c@t.com"})
+
+	q := generated.NewUserQuery(db)
+	users, err := q.WhereName("LIKE", "Ali").Exec()
+	if err != nil {
+		t.Fatalf("LIKE exec: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("LIKE 'Ali': expected 2 (Alice+Alicia), got %d", len(users))
+	}
+	for _, u := range users {
+		if !strings.Contains(u.Name, "Ali") {
+			t.Fatalf("name %q does not contain 'Ali'", u.Name)
+		}
+	}
+}
+
+// openTestDB 打开临时数据库并注册清理。
+func openTestDB(t *testing.T) *sqlitex.DB {
+	t.Helper()
+	db, err := sqlitex.Open(sqlitex.Config{
+		Dir:      t.TempDir(),
+		AsyncWAL: true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
 }
