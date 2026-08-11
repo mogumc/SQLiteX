@@ -3,6 +3,8 @@
 # SQLiteX
 SQLiteX 是一个基于Go的编译时数据库，针对本地/云原生应用优化，旨在解决SQLite的性能问题同时保持轻量化。
 
+> 📚 **文档**：快速上手 → [`docs/quickstart.md`](docs/quickstart.md) · Schema 指南 → [`docs/schema.md`](docs/schema.md) · API 参考 → [`docs/api.md`](docs/api.md) · TTL 生命周期 → [`docs/ttl.md`](docs/ttl.md) · 性能调优 → [`docs/performance.md`](docs/performance.md)
+
 ## 为什么有这个项目?
 
 SQLiteX 是一个专为 Go 语言打造的极速、嵌入式、静态类型的键值数据库包（Package）。它诞生于对标准 SQLite 在处理高频写入与海量大二进制/长文本日志时性能瓶颈带来的问题。  
