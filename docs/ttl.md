@@ -1,7 +1,5 @@
 # TTL 与生命周期管理
 
-SQLiteX 的 TTL 在**上层（生成代码）实现**，而非依赖 Pebble 原生能力——因为 Pebble v1.1.5 没有原生 ExpiresAt。所有 TTL 记录在写入时把过期时间戳写进 Value 的 Meta Header，读取时检查并惰性删除。
-
 ## 1. 数据布局
 
 TTL 表的 Value 头部额外携带 8 字节过期时间戳：

@@ -107,7 +107,7 @@ _目标： 实现 SQLiteX 区别于普通 KV 库的高级特性，重点解决�
 ### Phase 3: 生产级加固、生命周期与生态 (Production Hardening)
 _目标： 补齐企业级/生产环境所需的可观测性、数据生命周期管理与运维工具，达到 Production-Ready 状态。_
 
-*   **TTL 与生命周期管理**：结合 Pebble 原生的 `ExpiresAt` 与上层的 Meta Header 时间戳，实现读取时的惰性删除（Lazy Deletion）与 Compaction 阶段的物理清理联动。
+*   **TTL 与生命周期管理**：实现读取时的惰性删除（Lazy Deletion）与 Compaction 阶段的物理清理联动。
 *   **内建可观测性**：在生成的 CRUD 方法、热缓存层和 MPSC 队列中注入 Prometheus Metrics（涵盖 QPS、延迟 P99、缓存命中率、内存/磁盘使用率、队列深度）。
 *   **零停机热备份**：封装 Pebble 的 `Checkpoint` API，提供无阻塞的快照导出功能，支持将数据目录安全拷贝至备份路径。
 *   **独立 Web Admin 工具**：开发轻量级 CLI 工具，读取 `.proto` 文件和 Pebble 数据目录，启动内嵌的 HTTP Server 提供可视化数据浏览、Schema 查看与基础调试面板。
