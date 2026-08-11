@@ -153,11 +153,19 @@ func _decompressZstd(src []byte) ([]byte, error) {
 
 var _ = math.Float32bits
 
-// Serialize 将 {{.MessageName}} 序列化为字节切片。
+// Serialize 将 {{.MessageName}} 序列化为字节切片（无 TTL，永不过期）。
 func (m *{{.MessageName}}) Serialize() []byte {
+	return m.SerializeWithExpiry(0)
+}
+
+// SerializeWithExpiry 将 {{.MessageName}} 序列化，Meta Header 记录过期时间戳。
+// expiresAt 为 UnixNano，0 表示永不过期。
+// Value 布局: [8B expiresAt][payload]
+func (m *{{.MessageName}}) SerializeWithExpiry(expiresAt int64) []byte {
 	size := m.Size()
 	buf := make([]byte, size)
-	off := 0
+	binary.LittleEndian.PutUint64(buf, uint64(expiresAt))
+	off := 8
 {{- range .Fields}}
 {{- if .IsVarLen}}
 {{- if .Compress}}
@@ -212,32 +220,41 @@ func (m *{{.MessageName}}) Serialize() []byte {
 }
 
 // Deserialize{{.MessageName}} 从字节切片反序列化为 {{.MessageName}}。
+// 忽略 Meta Header 的过期时间戳，返回数据本身。
 func Deserialize{{.MessageName}}(data []byte) (*{{.MessageName}}, error) {
-	if len(data) < {{.MinSize}} {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}} data too short: %d < {{.MinSize}}", len(data))
+	m, _, err := Deserialize{{.MessageName}}Meta(data)
+	return m, err
+}
+
+// Deserialize{{.MessageName}}Meta 反序列化并返回 Meta Header 中的过期时间戳。
+// 返回的 expiresAt 为 UnixNano，0 表示永不过期。
+func Deserialize{{.MessageName}}Meta(data []byte) (*{{.MessageName}}, int64, error) {
+	if len(data) < {{.MinSize}}+8 {
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}} data too short: %d < {{.MinSize}}+8", len(data))
 	}
+	expiresAt := int64(binary.LittleEndian.Uint64(data))
 	m := &{{.MessageName}}{}
-	off := 0
+	off := 8
 	var vLen int
 {{- range .Fields}}
 {{- if .IsVarLen}}
 {{- if .Compress}}
 	// {{.GoName}} (compressible varlen)
 	if off+8 > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
 	}
 	vLen = int(binary.LittleEndian.Uint32(data[off:]))
 	origLen := int(binary.LittleEndian.Uint32(data[off+4:]))
 	off += 8
 	if off+vLen > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} data truncated: need %d, have %d", vLen, len(data)-off)
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} data truncated: need %d, have %d", vLen, len(data)-off)
 	}
 	if vLen == origLen {
 		m.{{.GoName}} = {{if eq .GoType "string"}}string(data[off:off+vLen]){{else}}append([]byte(nil), data[off:off+vLen]...){{end}}
 	} else {
 		dec, err := _decompressZstd(data[off:off+vLen])
 		if err != nil {
-			return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} zstd decompress: %w", err)
+			return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} zstd decompress: %w", err)
 		}
 		m.{{.GoName}} = {{if eq .GoType "string"}}string(dec){{else}}dec{{end}}
 	}
@@ -245,66 +262,66 @@ func Deserialize{{.MessageName}}(data []byte) (*{{.MessageName}}, error) {
 {{- else}}
 	// {{.GoName}} (varlen)
 	if off+4 > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} length prefix truncated")
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} length prefix truncated")
 	}
 	vLen = int(binary.LittleEndian.Uint32(data[off:]))
 	off += 4
 	if off+vLen > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} data truncated: need %d, have %d", vLen, len(data)-off)
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} data truncated: need %d, have %d", vLen, len(data)-off)
 	}
 	m.{{.GoName}} = {{if eq .GoType "string"}}string(data[off:off+vLen]){{else}}append([]byte(nil), data[off:off+vLen]...){{end}}
 	off += vLen
 {{- end}}
 {{- else if eq .GoType "bool"}}
 	if off+{{.FixedLen}} > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
 	}
 	m.{{.GoName}} = data[off] != 0
 	off += {{.FixedLen}}
 {{- else if eq .GoType "float32"}}
 	if off+{{.FixedLen}} > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
 	}
 	m.{{.GoName}} = math.Float32frombits(binary.LittleEndian.Uint32(data[off:]))
 	off += {{.FixedLen}}
 {{- else if eq .GoType "float64"}}
 	if off+{{.FixedLen}} > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
 	}
 	m.{{.GoName}} = math.Float64frombits(binary.LittleEndian.Uint64(data[off:]))
 	off += {{.FixedLen}}
 {{- else if eq .GoType "int32"}}
 	if off+{{.FixedLen}} > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
 	}
 	m.{{.GoName}} = int32(binary.LittleEndian.Uint32(data[off:]))
 	off += {{.FixedLen}}
 {{- else if eq .GoType "uint32"}}
 	if off+{{.FixedLen}} > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
 	}
 	m.{{.GoName}} = binary.LittleEndian.Uint32(data[off:])
 	off += {{.FixedLen}}
 {{- else if eq .GoType "int64"}}
 	if off+{{.FixedLen}} > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
 	}
 	m.{{.GoName}} = int64(binary.LittleEndian.Uint64(data[off:]))
 	off += {{.FixedLen}}
 {{- else if eq .GoType "uint64"}}
 	if off+{{.FixedLen}} > len(data) {
-		return nil, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
+		return nil, 0, fmt.Errorf("sqlitex: {{$.MessageName}}.{{.GoName}} truncated")
 	}
 	m.{{.GoName}} = binary.LittleEndian.Uint64(data[off:])
 	off += {{.FixedLen}}
 {{- end}}
 {{- end}}
-	return m, nil
+	return m, expiresAt, nil
 }
 
-// Size 返回序列化所需的缓冲区大小（上限估计）。
+// Size 返回序列化所需的缓冲区大小（上限估计），含 8B Meta Header。
 func (m *{{.MessageName}}) Size() int {
-	size := {{.MinSize}}
+	size := {{.MinSize}} + 8
 {{- range .Fields}}
 {{- if .IsVarLen}}
 	size += 4 + len(m.{{.GoName}})

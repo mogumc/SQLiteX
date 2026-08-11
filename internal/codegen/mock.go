@@ -15,6 +15,7 @@ func GenerateMock(table *TableIR) string {
 		PKGoName:    toGoName(table.PrimaryKey.Name),
 		PKGoType:    table.PrimaryKey.GoType,
 		TableID:     table.TableID,
+		HasTTL:      table.HasTTL,
 	}
 
 	var buf bytes.Buffer
@@ -32,6 +33,7 @@ type mockData struct {
 	PKGoName    string
 	PKGoType    string
 	TableID     uint64
+	HasTTL      bool
 }
 
 var mockTemplate = `package {{.PackageName}}
@@ -104,4 +106,12 @@ func (m *mock{{.EntityName}}Store) Get({{.PKGoName}} {{.PKGoType}}) (*{{.EntityN
 	clone := *record
 	return &clone, nil
 }
+{{- if .HasTTL}}
+
+// PurgeExpired 内存 Mock 不模拟 TTL 语义，恒返回 0。
+// 接口兼容用，TTL 行为请使用真实 Store 验证。
+func (m *mock{{.EntityName}}Store) PurgeExpired() (int, error) {
+	return 0, nil
+}
+{{- end}}
 `

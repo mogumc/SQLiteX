@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package example;
+
+option go_package = "github.com/mogumc/sqlitex/example/ttluser";
+
+import "sqlitex/options.proto";
+
+// Session 演示 Phase 3 TTL 生命周期管理。
+// token 字段声明 ttl = "1s"，表示该记录在写入 1 秒后过期。
+// 读取时惰性删除（含索引行同步清理），Compaction 阶段物理回收。
+message Session {
+  option (sqlitex.table).primary_key = "id";
+
+  int64 id = 1 [(sqlitex.field).primary_key = true];
+  string token = 2 [(sqlitex.field).ttl = "1s"];
+  string user_id = 3 [(sqlitex.field).index = INDEX_NORMAL];
+  bool active = 4;
+}

@@ -31,6 +31,8 @@ type storeData struct {
 	PKGoType      string // int64
 	TableID       uint64
 	IndexedFields []indexField // 二级索引字段列表
+	HasTTL        bool         // 是否声明记录级 TTL
+	TTL           int64        // TTL 纳秒时长
 }
 
 // indexField 描述一个二级索引字段，供模板生成索引维护代码。
@@ -64,6 +66,8 @@ func buildStoreData(table *TableIR) storeData {
 		PKGoType:      pk.GoType,
 		TableID:       table.TableID,
 		IndexedFields: idxFields,
+		HasTTL:        table.HasTTL,
+		TTL:           int64(table.TTL),
 	}
 }
 
@@ -84,6 +88,7 @@ var storeTmpl = `package {{.PackageName}}
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/mogumc/sqlitex"
 	"github.com/mogumc/sqlitex/internal/encoding"
@@ -95,6 +100,11 @@ type {{.StoreName}} interface {
 	Update(m *{{.MessageName}}) error
 	Delete({{.PKGoName}} {{.PKGoType}}) error
 	Get({{.PKGoName}} {{.PKGoType}}) (*{{.MessageName}}, error)
+{{- if .HasTTL}}
+	// PurgeExpired 主动清理所有过期记录（含索引），返回删除条数。
+	// 供用户后台定时调用，消除惰性删除窗口期的逻辑过期数据。
+	PurgeExpired() (int, error)
+{{- end}}
 }
 
 // {{.StoreImpl}} 实现 {{.StoreName}} 接口。
@@ -110,6 +120,9 @@ func New{{.StoreName}}(db *sqlitex.DB) {{.StoreName}} {
 
 // Create 创建新的 {{.MessageName}} 记录。
 // 通过 WriteBatch 原子写入主数据行 + 所有二级索引。
+{{- if .HasTTL}}
+// 记录级 TTL: 写入时计算 expiresAt = now + {{.TTL}}ns，过期后惰性删除。
+{{- end}}
 func (s *{{.StoreImpl}}) Create(m *{{.MessageName}}) error {
 	if m == nil {
 		return fmt.Errorf("sqlitex: cannot create nil {{.MessageName}}")
@@ -117,7 +130,11 @@ func (s *{{.StoreImpl}}) Create(m *{{.MessageName}}) error {
 	
 	pkBytes := encode{{.MessageName}}PrimaryKey(m.{{.PKGoName}})
 	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
+{{- if .HasTTL}}
+	value := m.SerializeWithExpiry(time.Now().UnixNano() + {{.TTL}})
+{{- else}}
 	value := m.Serialize()
+{{- end}}
 	
 	ops := make([]sqlitex.KVPair, 0, 1+{{len .IndexedFields}})
 	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
@@ -139,8 +156,11 @@ func (s *{{.StoreImpl}}) Update(m *{{.MessageName}}) error {
 	
 	pkBytes := encode{{.MessageName}}PrimaryKey(m.{{.PKGoName}})
 	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
+{{- if .HasTTL}}
+	value := m.SerializeWithExpiry(time.Now().UnixNano() + {{.TTL}})
+{{- else}}
 	value := m.Serialize()
-	
+{{- end}}
 	ops := make([]sqlitex.KVPair, 0, 1+{{len .IndexedFields}}*2)
 	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
 	{{- if .IndexedFields}}
@@ -189,6 +209,9 @@ func (s *{{.StoreImpl}}) Delete({{.PKGoName}} {{.PKGoType}}) error {
 }
 
 // Get 根据主键查询 {{.MessageName}} 记录。
+{{- if .HasTTL}}
+// TTL 惰性删除: 记录已过期时物理删除并返回 nil。
+{{- end}}
 func (s *{{.StoreImpl}}) Get({{.PKGoName}} {{.PKGoType}}) (*{{.MessageName}}, error) {
 	pkBytes := encode{{.MessageName}}PrimaryKey({{.PKGoName}})
 	key := encoding.EncodeKey(s.tableID, pkBytes)
@@ -200,7 +223,21 @@ func (s *{{.StoreImpl}}) Get({{.PKGoName}} {{.PKGoType}}) (*{{.MessageName}}, er
 	if value == nil {
 		return nil, nil
 	}
+{{- if .HasTTL}}
+	// 惰性删除: 检查 Meta Header 过期时间戳
+	m, expiresAt, err := Deserialize{{.MessageName}}Meta(value)
+	if err != nil {
+		return nil, err
+	}
+	if expiresAt > 0 && time.Now().UnixNano() > expiresAt {
+		// 过期: 原子删除数据行 + 索引行（产生 tombstone，Compaction 时物理回收）
+		delete{{.MessageName}}WithIndexes(s.db, s.tableID, key, m)
+		return nil, nil
+	}
+	return m, nil
+{{- else}}
 	return Deserialize{{.MessageName}}(value)
+{{- end}}
 }
 
 // encode{{.MessageName}}PrimaryKey 编码主键为字节切片。
@@ -241,5 +278,58 @@ func encode{{$.MessageName}}Index{{.GoName}}Value(v int32) []byte { buf := make(
 {{- else}}
 func encode{{$.MessageName}}Index{{.GoName}}Value(v {{.GoType}}) []byte { return []byte(fmt.Sprintf("%v", v)) }
 {{- end}}
+{{- end}}
+{{- if .HasTTL}}
+
+// delete{{.MessageName}}WithIndexes 原子删除记录及其全部索引条目。
+// 供 TTL 惰性删除与 PurgeExpired 复用，保证数据行与索引行一致清理。
+func delete{{.MessageName}}WithIndexes(db *sqlitex.DB, tableID uint64, dataKey []byte, m *{{.MessageName}}) error {
+	_, pkBytes, err := encoding.DecodeKey(dataKey)
+	if err != nil {
+		return err
+	}
+{{- if .IndexedFields}}
+	ops := make([]sqlitex.KVPair, 0, 1+{{len .IndexedFields}})
+	ops = append(ops, sqlitex.KVPair{Key: dataKey, Delete: true})
+	{{- range .IndexedFields}}
+	ops = append(ops, sqlitex.KVPair{
+		Key:    encoding.EncodeIndexKey(tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(m.{{.GoName}}), pkBytes),
+		Delete: true,
+	})
+	{{- end}}
+	return db.WriteBatch(ops)
+{{- else}}
+	_ = pkBytes // 无索引字段，仅删除数据行
+	return db.Delete(dataKey)
+{{- end}}
+}
+
+// PurgeExpired 主动清理全部过期记录及其索引，返回删除条数。
+// 调用时机由用户决定（如后台定时任务），用于消除惰性删除窗口期的逻辑过期数据，
+// 同时提前释放墓碑空间，降低 Compaction 压力。
+func (s *{{.StoreImpl}}) PurgeExpired() (int, error) {
+	prefix := encoding.EncodeKey(s.tableID, nil)
+	iter := s.db.Iterate(prefix)
+	if iter == nil {
+		return 0, nil
+	}
+	defer iter.Close()
+
+	count := 0
+	now := time.Now().UnixNano()
+	for iter.Next() {
+		key := iter.Key()
+		m, expiresAt, err := Deserialize{{.MessageName}}Meta(iter.Value())
+		if err != nil {
+			continue // 跳过损坏数据
+		}
+		if expiresAt > 0 && now > expiresAt {
+			if err := delete{{.MessageName}}WithIndexes(s.db, s.tableID, key, m); err == nil {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
 {{- end}}
 `

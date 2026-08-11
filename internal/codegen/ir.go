@@ -7,6 +7,7 @@ package codegen
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
@@ -36,6 +37,10 @@ type TableIR struct {
 	TableID uint64
 	// GoPackage 生成代码的目标 Go 包名。
 	GoPackage string
+	// TTL 记录级过期时长。任一字段声明 ttl option 时生效（取首个）。
+	TTL time.Duration
+	// HasTTL 是否声明了 TTL。
+	HasTTL bool
 }
 
 // FieldIR 是单个字段的中间表示。
@@ -139,6 +144,16 @@ func buildTableIR(
 		if shouldCompress(fir, table.TableCompress, table.CompressThreshold) {
 			table.CompressibleFields = append(table.CompressibleFields, fir)
 		}
+
+		// 解析 TTL：任一字段声明 ttl option，取首个作为记录级过期时长
+		if !table.HasTTL && fir.TTL != "" {
+			d, err := parseTTL(fir.TTL)
+			if err != nil {
+				return nil, fmt.Errorf("field %s ttl %q: %w", fir.Name, fir.TTL, err)
+			}
+			table.TTL = d
+			table.HasTTL = true
+		}
 	}
 
 	if table.PrimaryKey == nil {
@@ -146,6 +161,28 @@ func buildTableIR(
 	}
 
 	return table, nil
+}
+
+// parseTTL 将 TTL 字符串解析为 time.Duration。
+// 支持 Go duration 语法："30s"、"5m"、"24h"、"7d"（天为扩展单位）。
+func parseTTL(s string) (time.Duration, error) {
+	// 支持 "7d" 天单位扩展
+	if strings.HasSuffix(s, "d") {
+		numStr := strings.TrimSuffix(s, "d")
+		var days int64
+		if _, err := fmt.Sscanf(numStr, "%d", &days); err != nil || days <= 0 {
+			return 0, fmt.Errorf("invalid TTL day value: %q", s)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, err
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("TTL must be positive: %q", s)
+	}
+	return d, nil
 }
 
 // buildFieldIR 从 FieldDescriptor 构建 FieldIR。

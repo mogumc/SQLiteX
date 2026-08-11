@@ -15,6 +15,7 @@ type queryData struct {
 	QueryFields  []*queryField
 	IndexedField *queryField
 	PKGoType     string
+	HasTTL       bool
 }
 
 type queryField struct {
@@ -44,6 +45,7 @@ func GenerateQuery(table *TableIR) (string, error) {
 		QueryName:   table.MessageName + "Query",
 		TableID:     table.TableID,
 		PKGoType:    table.PrimaryKey.GoType,
+		HasTTL:      table.HasTTL,
 	}
 
 	for _, f := range table.Fields {
@@ -73,6 +75,9 @@ import (
 {{- end}}
 	"encoding/binary"
 	"fmt"
+{{- if .HasTTL}}
+	"time"
+{{- end}}
 	"strings"
 
 	"github.com/mogumc/sqlitex"
@@ -137,8 +142,17 @@ func (q *{{.QueryName}}) execIndexed() ([]*{{.EntityName}}, error) {
 		dataKey := encoding.EncodeKey({{.TableID}}, pkBytes)
 		value, err := q.db.Get(dataKey)
 		if err != nil || value == nil { continue }
+{{- if .HasTTL}}
+		m, expiresAt, err := Deserialize{{.EntityName}}Meta(value)
+		if err != nil { continue }
+		if expiresAt > 0 && time.Now().UnixNano() > expiresAt {
+			delete{{.EntityName}}WithIndexes(q.db, {{.TableID}}, dataKey, m) // 惰性删除 + 索引清理
+			continue
+		}
+{{- else}}
 		m, err := Deserialize{{.EntityName}}(value)
 		if err != nil { continue }
+{{- end}}
 		if len(q.where) > 1 && !q.matchWhereTail(m) { continue }
 		results = append(results, m)
 		if q.limit > 0 && len(results) >= q.limit { break }
@@ -158,9 +172,19 @@ func (q *{{.QueryName}}) execFullScan() ([]*{{.EntityName}}, error) {
 
 	var results []*{{.EntityName}}
 	for iter.Next() {
+		key := iter.Key()
 		value := iter.Value()
+{{- if .HasTTL}}
+		m, expiresAt, err := Deserialize{{.EntityName}}Meta(value)
+		if err != nil { continue }
+		if expiresAt > 0 && time.Now().UnixNano() > expiresAt {
+			delete{{.EntityName}}WithIndexes(q.db, {{.TableID}}, key, m) // 惰性删除 + 索引清理
+			continue
+		}
+{{- else}}
 		m, err := Deserialize{{.EntityName}}(value)
 		if err != nil { continue }
+{{- end}}
 		if q.matchWhere(m) {
 			results = append(results, m)
 			if q.limit > 0 && len(results) >= q.limit { break }
