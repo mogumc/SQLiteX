@@ -6,6 +6,7 @@ package codegen
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -166,11 +167,11 @@ func buildTableIR(
 // parseTTL 将 TTL 字符串解析为 time.Duration。
 // 支持 Go duration 语法："30s"、"5m"、"24h"、"7d"（天为扩展单位）。
 func parseTTL(s string) (time.Duration, error) {
-	// 支持 "7d" 天单位扩展
+	// 支持 "7d" 天单位扩展：整数天，拒绝小数/非法尾部
 	if strings.HasSuffix(s, "d") {
 		numStr := strings.TrimSuffix(s, "d")
-		var days int64
-		if _, err := fmt.Sscanf(numStr, "%d", &days); err != nil || days <= 0 {
+		days, err := strconv.ParseInt(numStr, 10, 64)
+		if err != nil || days <= 0 {
 			return 0, fmt.Errorf("invalid TTL day value: %q", s)
 		}
 		return time.Duration(days) * 24 * time.Hour, nil

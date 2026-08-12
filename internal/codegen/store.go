@@ -88,7 +88,9 @@ var storeTmpl = `package {{.PackageName}}
 import (
 	"encoding/binary"
 	"fmt"
+{{- if .HasTTL}}
 	"time"
+{{- end}}
 
 	"github.com/mogumc/sqlitex"
 	"github.com/mogumc/sqlitex/internal/encoding"

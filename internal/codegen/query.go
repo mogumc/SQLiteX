@@ -172,7 +172,9 @@ func (q *{{.QueryName}}) execFullScan() ([]*{{.EntityName}}, error) {
 
 	var results []*{{.EntityName}}
 	for iter.Next() {
+{{- if .HasTTL}}
 		key := iter.Key()
+{{- end}}
 		value := iter.Value()
 {{- if .HasTTL}}
 		m, expiresAt, err := Deserialize{{.EntityName}}Meta(value)
@@ -256,13 +258,4 @@ func (q *{{$.QueryName}}) compare{{.GoName}}(actual {{.GoType}}, op string) bool
 	return false
 }
 {{end}}
-
-func splitWhere(cond string) []string {
-	lastSpace := -1
-	for i := len(cond) - 1; i >= 0; i-- { if cond[i] == ' ' { lastSpace = i; break } }
-	if lastSpace < 0 { return nil }
-	inner := cond[:lastSpace]
-	for i := len(inner) - 1; i >= 0; i-- { if inner[i] == ' ' { return []string{inner[:i], inner[i+1:]} } }
-	return nil
-}
 `
