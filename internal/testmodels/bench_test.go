@@ -1,37 +1,37 @@
-package generated_test
+package testmodels_test
 
 import (
 	"fmt"
 	"testing"
 
 	"github.com/mogumc/sqlitex"
-	"github.com/mogumc/sqlitex/example/generated"
+	"github.com/mogumc/sqlitex/internal/testmodels"
 )
 
 // benchDB 创建临时数据库并预填 N 条记录。
 // 每条记录: email 有唯一索引, name 无索引。
-func benchDB(b *testing.B, n int) (*sqlitex.DB, *generated.UserStore) {
+func benchDB(b *testing.B, n int) (*sqlitex.DB, testmodels.UserStore) {
 	b.Helper()
 	db, err := sqlitex.Open(sqlitex.Config{
-		Dir:         b.TempDir(),
-		AsyncWAL:    true,
-		CacheMaxMB:  -1, // 禁用 TinyLFU, 隔离缓存影响, 纯测存储扫描
+		Dir:        b.TempDir(),
+		AsyncWAL:   true,
+		CacheMaxMB: -1, // 禁用 TinyLFU, 隔离缓存影响, 纯测存储扫描
 	})
 	if err != nil {
 		b.Fatalf("open: %v", err)
 	}
 	b.Cleanup(func() { db.Close() })
 
-	store := generated.NewUserStore(db)
+	store := testmodels.NewUserStore(db)
 	for i := 1; i <= n; i++ {
-		if err := store.Create(&generated.User{
+		if err := store.Create(&testmodels.User{
 			Id: int64(i), Name: fmt.Sprintf("user-%d", i),
 			Email: fmt.Sprintf("mail-%d@test.com", i), Active: true,
 		}); err != nil {
 			b.Fatalf("create %d: %v", i, err)
 		}
 	}
-	return db, &store
+	return db, store
 }
 
 // BenchmarkIndexedQueryByEmail 走二级索引: WHERE email='mail-5000@test.com'
@@ -42,7 +42,7 @@ func BenchmarkIndexedQueryByEmail(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q := generated.NewUserQuery(db)
+		q := testmodels.NewUserQuery(db)
 		users, err := q.WhereEmail("=", target).Exec()
 		if err != nil {
 			b.Fatalf("exec: %v", err)
@@ -61,7 +61,7 @@ func BenchmarkFullScanQueryByName(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q := generated.NewUserQuery(db)
+		q := testmodels.NewUserQuery(db)
 		users, err := q.WhereName("=", target).Exec()
 		if err != nil {
 			b.Fatalf("exec: %v", err)
@@ -79,7 +79,7 @@ func BenchmarkIndexedQueryLargeTable(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q := generated.NewUserQuery(db)
+		q := testmodels.NewUserQuery(db)
 		users, err := q.WhereEmail("=", target).Exec()
 		if err != nil {
 			b.Fatalf("exec: %v", err)
@@ -97,7 +97,7 @@ func BenchmarkFullScanQueryLargeTable(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q := generated.NewUserQuery(db)
+		q := testmodels.NewUserQuery(db)
 		users, err := q.WhereName("=", target).Exec()
 		if err != nil {
 			b.Fatalf("exec: %v", err)

@@ -1,4 +1,4 @@
-package generated_test
+package testmodels_test
 
 import (
 	"fmt"
@@ -6,23 +6,36 @@ import (
 	"testing"
 
 	"github.com/mogumc/sqlitex"
-	"github.com/mogumc/sqlitex/example/generated"
+	"github.com/mogumc/sqlitex/internal/testmodels"
 )
 
-func TestGeneratedStoreIntegration(t *testing.T) {
-	// 创建临时数据库
+// openTestDB 打开临时数据库并注册清理。
+func openTestDB(t *testing.T) *sqlitex.DB {
+	t.Helper()
 	db, err := sqlitex.Open(sqlitex.Config{
-		Dir: t.TempDir(),
+		Dir:      t.TempDir(),
+		AsyncWAL: true,
 	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// ===== CRUD =====
+
+func TestUserStoreIntegration(t *testing.T) {
+	db, err := sqlitex.Open(sqlitex.Config{Dir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
 
-	store := generated.NewUserStore(db)
+	store := testmodels.NewUserStore(db)
 
 	// 1. Create
-	user := &generated.User{
+	user := &testmodels.User{
 		Id:    1,
 		Name:  "Alice",
 		Email: "alice@example.com",
@@ -78,10 +91,10 @@ func TestGeneratedStoreIntegration(t *testing.T) {
 	}
 }
 
-func TestGeneratedMockStore(t *testing.T) {
-	mock := generated.NewMockUserStore()
+func TestUserMockStore(t *testing.T) {
+	mock := testmodels.NewMockUserStore()
 
-	user := &generated.User{
+	user := &testmodels.User{
 		Id:    1,
 		Name:  "Bob",
 		Email: "bob@example.com",
@@ -119,16 +132,15 @@ func TestGeneratedMockStore(t *testing.T) {
 	}
 }
 
-func TestGeneratedSerializerRoundTrip(t *testing.T) {
-	user := &generated.User{
+func TestUserSerializerRoundTrip(t *testing.T) {
+	user := &testmodels.User{
 		Id:    42,
 		Name:  "Charlie",
 		Email: "charlie@example.com",
 	}
 
-	// 序列化 → 反序列化 往返
 	data := user.Serialize()
-	restored, err := generated.DeserializeUser(data)
+	restored, err := testmodels.DeserializeUser(data)
 	if err != nil {
 		t.Fatalf("deserialize: %v", err)
 	}
@@ -144,19 +156,13 @@ func TestGeneratedSerializerRoundTrip(t *testing.T) {
 	}
 }
 
-func TestGeneratedQueryBuilder(t *testing.T) {
-	db, err := sqlitex.Open(sqlitex.Config{
-		Dir: t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
+// ===== Query =====
 
-	store := generated.NewUserStore(db)
+func TestUserQueryBuilder(t *testing.T) {
+	db := openTestDB(t)
+	store := testmodels.NewUserStore(db)
 
-	// 插入测试数据
-	users := []*generated.User{
+	users := []*testmodels.User{
 		{Id: 1, Name: "Alice", Email: "alice@test.com"},
 		{Id: 2, Name: "Bob", Email: "bob@test.com"},
 		{Id: 3, Name: "Charlie", Email: "charlie@test.com"},
@@ -167,9 +173,7 @@ func TestGeneratedQueryBuilder(t *testing.T) {
 		}
 	}
 
-	// Query 查询
-	q := generated.NewUserQuery(db)
-	results, err := q.Exec()
+	results, err := testmodels.NewUserQuery(db).Exec()
 	if err != nil {
 		t.Fatalf("query exec: %v", err)
 	}
@@ -177,9 +181,8 @@ func TestGeneratedQueryBuilder(t *testing.T) {
 		t.Fatalf("expected 3 users, got %d", len(results))
 	}
 
-	// Query + Limit
-	q2 := generated.NewUserQuery(db)
-	results, err = q2.Limit(1).Exec()
+	// Limit
+	results, err = testmodels.NewUserQuery(db).Limit(1).Exec()
 	if err != nil {
 		t.Fatalf("limit query: %v", err)
 	}
@@ -188,8 +191,7 @@ func TestGeneratedQueryBuilder(t *testing.T) {
 	}
 
 	// First
-	q3 := generated.NewUserQuery(db)
-	first, err := q3.First()
+	first, err := testmodels.NewUserQuery(db).First()
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
@@ -198,8 +200,7 @@ func TestGeneratedQueryBuilder(t *testing.T) {
 	}
 
 	// Count
-	q4 := generated.NewUserQuery(db)
-	count, err := q4.Count()
+	count, err := testmodels.NewUserQuery(db).Count()
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -208,22 +209,20 @@ func TestGeneratedQueryBuilder(t *testing.T) {
 	}
 }
 
-// ===== Phase 2: 二级索引 =====
+// ===== 二级索引 =====
 
-func TestGeneratedIndexQueryByEmail(t *testing.T) {
+func TestUserIndexQueryByEmail(t *testing.T) {
 	db := openTestDB(t)
-	store := generated.NewUserStore(db)
+	store := testmodels.NewUserStore(db)
 
 	for i := int64(1); i <= 5; i++ {
-		store.Create(&generated.User{
+		store.Create(&testmodels.User{
 			Id: i, Name: fmt.Sprintf("U%d", i),
 			Email: fmt.Sprintf("u%d@test.com", i), Active: true,
 		})
 	}
 
-	// 非主键唯一索引查询
-	q := generated.NewUserQuery(db)
-	users, err := q.WhereEmail("=", "u3@test.com").Exec()
+	users, err := testmodels.NewUserQuery(db).WhereEmail("=", "u3@test.com").Exec()
 	if err != nil {
 		t.Fatalf("index exec: %v", err)
 	}
@@ -232,20 +231,18 @@ func TestGeneratedIndexQueryByEmail(t *testing.T) {
 	}
 }
 
-func TestGeneratedIndexQueryByCreatedAt(t *testing.T) {
+func TestUserIndexQueryByCreatedAt(t *testing.T) {
 	db := openTestDB(t)
-	store := generated.NewUserStore(db)
+	store := testmodels.NewUserStore(db)
 
 	for i := int64(1); i <= 10; i++ {
-		store.Create(&generated.User{
+		store.Create(&testmodels.User{
 			Id: i, Name: fmt.Sprintf("U%d", i),
 			Email: fmt.Sprintf("u%d@t.com", i), CreatedAt: 1000,
 		})
 	}
 
-	// 普通索引: 同值多条
-	q := generated.NewUserQuery(db)
-	users, err := q.WhereCreatedAt("=", 1000).Exec()
+	users, err := testmodels.NewUserQuery(db).WhereCreatedAt("=", 1000).Exec()
 	if err != nil {
 		t.Fatalf("index exec: %v", err)
 	}
@@ -254,21 +251,19 @@ func TestGeneratedIndexQueryByCreatedAt(t *testing.T) {
 	}
 }
 
-func TestGeneratedMultiConditionQuery(t *testing.T) {
+func TestUserMultiConditionQuery(t *testing.T) {
 	db := openTestDB(t)
-	store := generated.NewUserStore(db)
+	store := testmodels.NewUserStore(db)
 
 	for i := int64(1); i <= 6; i++ {
-		store.Create(&generated.User{
+		store.Create(&testmodels.User{
 			Id: i, Name: fmt.Sprintf("U%d", i),
-			Email: fmt.Sprintf("u%d@t.com", i),
+			Email:     fmt.Sprintf("u%d@t.com", i),
 			CreatedAt: 1000 + i, Active: i%2 == 0,
 		})
 	}
 
-	// 索引字段 + 普通字段 组合条件
-	q := generated.NewUserQuery(db)
-	users, err := q.WhereCreatedAt("=", 1002).WhereActive("=", true).Exec()
+	users, err := testmodels.NewUserQuery(db).WhereCreatedAt("=", 1002).WhereActive("=", true).Exec()
 	if err != nil {
 		t.Fatalf("multi exec: %v", err)
 	}
@@ -277,15 +272,14 @@ func TestGeneratedMultiConditionQuery(t *testing.T) {
 	}
 }
 
-func TestGeneratedDeleteCleansIndex(t *testing.T) {
+func TestUserDeleteCleansIndex(t *testing.T) {
 	db := openTestDB(t)
-	store := generated.NewUserStore(db)
+	store := testmodels.NewUserStore(db)
 
-	store.Create(&generated.User{Id: 1, Name: "A", Email: "a@t.com", Active: true})
+	store.Create(&testmodels.User{Id: 1, Name: "A", Email: "a@t.com", Active: true})
 	store.Delete(1)
 
-	q := generated.NewUserQuery(db)
-	users, err := q.WhereEmail("=", "a@t.com").Exec()
+	users, err := testmodels.NewUserQuery(db).WhereEmail("=", "a@t.com").Exec()
 	if err != nil {
 		t.Fatalf("exec after delete: %v", err)
 	}
@@ -294,14 +288,14 @@ func TestGeneratedDeleteCleansIndex(t *testing.T) {
 	}
 }
 
-// ===== Phase 2: 字段压缩 =====
+// ===== 字段压缩 =====
 
-func TestGeneratedCompressionRoundTrip(t *testing.T) {
+func TestUserCompressionRoundTrip(t *testing.T) {
 	db := openTestDB(t)
-	store := generated.NewUserStore(db)
+	store := testmodels.NewUserStore(db)
 
 	bigBio := strings.Repeat("压缩测试文本用于验证zstd字段级压缩效果 ", 50) // >256 bytes
-	store.Create(&generated.User{
+	store.Create(&testmodels.User{
 		Id: 1, Name: "A", Email: "a@t.com", Bio: bigBio, Active: true,
 	})
 
@@ -313,27 +307,24 @@ func TestGeneratedCompressionRoundTrip(t *testing.T) {
 		t.Fatalf("bio mismatch: got %d bytes, want %d", len(u.Bio), len(bigBio))
 	}
 
-	// 序列化后的数据应小于原始明文（验证压缩生效）
 	data := u.Serialize()
 	t.Logf("compressed payload size: %d vs raw bio: %d", len(data), len(bigBio))
 }
 
-// ===== Phase 2: 游标分页 =====
+// ===== 游标分页 =====
 
-func TestGeneratedCursorPagination(t *testing.T) {
+func TestUserCursorPagination(t *testing.T) {
 	db := openTestDB(t)
-	store := generated.NewUserStore(db)
+	store := testmodels.NewUserStore(db)
 
 	for i := int64(1); i <= 5; i++ {
-		store.Create(&generated.User{
+		store.Create(&testmodels.User{
 			Id: i, Name: fmt.Sprintf("U%d", i),
 			Email: fmt.Sprintf("u%d@t.com", i), Active: true,
 		})
 	}
 
-	// 第一页 2 条
-	q := generated.NewUserQuery(db)
-	page1, err := q.Limit(2).Exec()
+	page1, err := testmodels.NewUserQuery(db).Limit(2).Exec()
 	if err != nil {
 		t.Fatalf("page1: %v", err)
 	}
@@ -341,9 +332,7 @@ func TestGeneratedCursorPagination(t *testing.T) {
 		t.Fatalf("page1: expected 2, got %d", len(page1))
 	}
 
-	// AfterKey(nil) 编译验证 — 等价于不使用游标
-	q2 := generated.NewUserQuery(db)
-	page2, err := q2.Limit(2).AfterKey(nil).Exec()
+	page2, err := testmodels.NewUserQuery(db).Limit(2).AfterKey(nil).Exec()
 	if err != nil {
 		t.Fatalf("page2: %v", err)
 	}
@@ -352,18 +341,17 @@ func TestGeneratedCursorPagination(t *testing.T) {
 	}
 }
 
-// ===== Phase 2: LIKE 模糊查询 =====
+// ===== LIKE 模糊查询 =====
 
-func TestGeneratedLikeQuery(t *testing.T) {
+func TestUserLikeQuery(t *testing.T) {
 	db := openTestDB(t)
-	store := generated.NewUserStore(db)
+	store := testmodels.NewUserStore(db)
 
-	store.Create(&generated.User{Id: 1, Name: "Alice", Email: "a@t.com"})
-	store.Create(&generated.User{Id: 2, Name: "Bob", Email: "b@t.com"})
-	store.Create(&generated.User{Id: 3, Name: "Alicia", Email: "c@t.com"})
+	store.Create(&testmodels.User{Id: 1, Name: "Alice", Email: "a@t.com"})
+	store.Create(&testmodels.User{Id: 2, Name: "Bob", Email: "b@t.com"})
+	store.Create(&testmodels.User{Id: 3, Name: "Alicia", Email: "c@t.com"})
 
-	q := generated.NewUserQuery(db)
-	users, err := q.WhereName("LIKE", "Ali").Exec()
+	users, err := testmodels.NewUserQuery(db).WhereName("LIKE", "Ali").Exec()
 	if err != nil {
 		t.Fatalf("LIKE exec: %v", err)
 	}
@@ -377,16 +365,44 @@ func TestGeneratedLikeQuery(t *testing.T) {
 	}
 }
 
-// openTestDB 打开临时数据库并注册清理。
-func openTestDB(t *testing.T) *sqlitex.DB {
-	t.Helper()
-	db, err := sqlitex.Open(sqlitex.Config{
-		Dir:      t.TempDir(),
-		AsyncWAL: true,
-	})
-	if err != nil {
-		t.Fatalf("open db: %v", err)
+// ===== 序列化兼容性（#1 修复验证）=====
+
+// TestUserLegacyFormatCompat 验证无 TTL 表使用旧格式（无 8B header），
+// 序列化数据与 Phase 2 时代的历史格式完全一致。
+func TestUserLegacyFormatCompat(t *testing.T) {
+	// 旧格式：直接拼 [id(8B)][name: len(4)+data][email: len(4)+data][created_at(8B)][active(1B)][bio: compressible]
+	user := &testmodels.User{
+		Id:        7,
+		Name:      "legacy",
+		Email:     "legacy@t.com",
+		CreatedAt: 12345,
+		Active:    true,
+		Bio:       "short-bio", // 小于阈值，不压缩
 	}
-	t.Cleanup(func() { db.Close() })
-	return db
+
+	data := user.Serialize()
+
+	// 无 8B header：首 8 字节直接是 Id（旧格式 off:=0）
+	if id := int64(leUint64(data[0:8])); id != 7 {
+		t.Fatalf("legacy format: first 8 bytes should be Id=7, got %d", id)
+	}
+
+	// 反序列化仍正确
+	restored, err := testmodels.DeserializeUser(data)
+	if err != nil {
+		t.Fatalf("deserialize legacy: %v", err)
+	}
+	if restored.Id != 7 || restored.Name != "legacy" || restored.Email != "legacy@t.com" {
+		t.Fatalf("roundtrip mismatch: %+v", restored)
+	}
+
+	// 长度 = MinSize(25) + 变长。bio 短则不压缩，总长 = 25 + 4+6 + 4+12 + (4+4+9) = 64
+	if len(data) != 64 {
+		t.Errorf("legacy payload size = %d, want 64 (no 8B header)", len(data))
+	}
+}
+
+func leUint64(b []byte) uint64 {
+	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
 }

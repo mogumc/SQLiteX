@@ -49,13 +49,17 @@ func GenerateQuery(table *TableIR) (string, error) {
 	}
 
 	for _, f := range table.Fields {
-		if f.IsPrimaryKey || f.IsRepeated { continue }
+		if f.IsPrimaryKey || f.IsRepeated {
+			continue
+		}
 		qf := &queryField{
 			GoName: toGoName(f.Name), GoType: f.GoType,
 			FieldNum: f.Number, IsIndex: indexedFieldNums[f.Name] > 0,
 		}
 		data.QueryFields = append(data.QueryFields, qf)
-		if qf.IsIndex && data.IndexedField == nil { data.IndexedField = qf }
+		if qf.IsIndex && data.IndexedField == nil {
+			data.IndexedField = qf
+		}
 	}
 
 	var buf bytes.Buffer

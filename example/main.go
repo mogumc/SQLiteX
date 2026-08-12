@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/mogumc/sqlitex"
-	"github.com/mogumc/sqlitex/example/generated"
+	"github.com/mogumc/sqlitex/example/demo"
 )
 
 func main() {
@@ -21,52 +21,64 @@ func main() {
 	}
 	defer db.Close()
 
-	store := generated.NewUserStore(db)
+	userStore := demo.NewUserStore(db)
 
-	fmt.Println("=== SQLiteX CRUD Demo ===")
+	fmt.Println("=== SQLiteX Demo: User (CRUD + Query) ===")
 
 	// Create
 	fmt.Println("[Create]")
-	store.Create(&generated.User{Id: 1, Name: "Alice", Email: "alice@test.com", Active: true})
-	store.Create(&generated.User{Id: 2, Name: "Bob", Email: "bob@test.com", Active: false})
-	store.Create(&generated.User{Id: 3, Name: "Charlie", Email: "charlie@test.com", Active: true})
-	fmt.Println("  3 rows inserted")
+	userStore.Create(&demo.User{Id: 1, Name: "Alice", Email: "alice@test.com", Active: true})
+	userStore.Create(&demo.User{Id: 2, Name: "Bob", Email: "bob@test.com", Active: false})
+	fmt.Println("  2 rows inserted")
 
 	// Get
 	fmt.Println("[Get] id=1")
-	u, _ := store.Get(1)
+	u, _ := userStore.Get(1)
 	fmt.Printf("  %+v\n\n", u)
 
 	// Update
 	fmt.Println("[Update] id=1 name -> \"Alice Updated\"")
 	u.Name = "Alice Updated"
-	store.Update(u)
-	u, _ = store.Get(1)
+	userStore.Update(u)
+	u, _ = userStore.Get(1)
 	fmt.Printf("  %+v\n\n", u)
 
 	// Delete
 	fmt.Println("[Delete] id=2")
-	store.Delete(2)
-	u, _ = store.Get(2)
+	userStore.Delete(2)
+	u, _ = userStore.Get(2)
 	fmt.Printf("  id=2 exists: %v\n\n", u != nil)
 
-	// Query
-	fmt.Println("[Query] all rows")
-	results, _ := generated.NewUserQuery(db).Exec()
-	for _, r := range results {
-		fmt.Printf("  id=%d, name=%s, email=%s, active=%v\n", r.Id, r.Name, r.Email, r.Active)
+	// Query (索引: 唯一索引 email)
+	fmt.Println("[Query] WHERE email='alice@test.com' (二级索引)")
+	users, _ := demo.NewUserQuery(db).WhereEmail("=", "alice@test.com").Exec()
+	for _, r := range users {
+		fmt.Printf("  id=%d, name=%s, email=%s\n", r.Id, r.Name, r.Email)
 	}
 	fmt.Println()
 
-	// First
-	fmt.Println("[First]")
-	first, _ := generated.NewUserQuery(db).First()
-	fmt.Printf("  %+v\n\n", first)
+	// Query (LIKE)
+	fmt.Println("[Query] WHERE name LIKE 'Ali'")
+	users, _ = demo.NewUserQuery(db).WhereName("LIKE", "Ali").Exec()
+	for _, r := range users {
+		fmt.Printf("  id=%d, name=%s\n", r.Id, r.Name)
+	}
+	fmt.Println()
 
 	// Count
-	fmt.Println("[Count]")
-	count, _ := generated.NewUserQuery(db).Count()
-	fmt.Printf("  total: %d\n\n", count)
+	count, _ := demo.NewUserQuery(db).Count()
+	fmt.Printf("[Count] total: %d\n\n", count)
+
+	sessionStore := demo.NewSessionStore(db)
+
+	fmt.Println("=== SQLiteX Demo: Session (TTL) ===")
+	err = sessionStore.Create(&demo.Session{Id: 1, Token: "tok-1", UserId: "u1", Active: true})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("[Create] session with TTL=1s")
+	s, _ := sessionStore.Get(1)
+	fmt.Printf("  before expiry: %+v\n", s)
 
 	fmt.Println("=== Done ===")
 }

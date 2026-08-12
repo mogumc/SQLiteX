@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package example;
+
+option go_package = "github.com/mogumc/sqlitex/example/demo";
+
+import "sqlitex/options.proto";
+
+// User 综合样例（无 TTL）：演示主键、二级索引、字段压缩、游标分页。
+message User {
+  option (sqlitex.table).primary_key = "id";
+
+  int64 id = 1 [(sqlitex.field).primary_key = true];
+  string name = 2;
+  string email = 3 [(sqlitex.field).index = INDEX_UNIQUE];
+  int64 created_at = 4 [(sqlitex.field).index = INDEX_NORMAL];
+  bool active = 5;
+  string bio = 6 [(sqlitex.field).compress = true];
+}
+
+// Session 综合样例（TTL）：演示记录级过期、惰性删除、索引同步清理。
+// token 声明 ttl = "1s"，写入 1 秒后过期。
+message Session {
+  option (sqlitex.table).primary_key = "id";
+
+  int64 id = 1 [(sqlitex.field).primary_key = true];
+  string token = 2 [(sqlitex.field).ttl = "1s"];
+  string user_id = 3 [(sqlitex.field).index = INDEX_NORMAL];
+  bool active = 4;
+}

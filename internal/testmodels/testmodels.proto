@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package testmodels;
+
+option go_package = "github.com/mogumc/sqlitex/internal/testmodels";
+
+import "sqlitex/options.proto";
+
+// User 是统一测试模型的综合样例（无 TTL，旧格式序列化）：
+//   - 主键: id
+//   - 二级索引: email (唯一), created_at (普通)
+//   - 字段压缩: bio (大文本按需 zstd 压缩)
+//   - 游标分页: AfterKey + Limit
+message User {
+  option (sqlitex.table).primary_key = "id";
+
+  int64 id = 1 [(sqlitex.field).primary_key = true];
+  string name = 2;
+  string email = 3 [(sqlitex.field).index = INDEX_UNIQUE];
+  int64 created_at = 4 [(sqlitex.field).index = INDEX_NORMAL];
+  bool active = 5;
+  string bio = 6 [(sqlitex.field).compress = true];
+}
+
+// Session 是统一测试模型的 TTL 样例（Meta Header 格式序列化）：
+//   - token 声明 ttl = "1s"，写入 1 秒后过期
+//   - 读取时惰性删除（含索引同步清理）
+message Session {
+  option (sqlitex.table).primary_key = "id";
+
+  int64 id = 1 [(sqlitex.field).primary_key = true];
+  string token = 2 [(sqlitex.field).ttl = "1s"];
+  string user_id = 3 [(sqlitex.field).index = INDEX_NORMAL];
+  bool active = 4;
+}

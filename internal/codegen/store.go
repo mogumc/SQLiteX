@@ -37,11 +37,11 @@ type storeData struct {
 
 // indexField 描述一个二级索引字段，供模板生成索引维护代码。
 type indexField struct {
-	GoName     string // 字段 Go 名
-	ProtoName  string // 字段原始名
-	GoType     string // Go 类型
-	FieldNum   int32  // proto 字段编号
-	IsUnique   bool   // 是否唯一索引
+	GoName    string // 字段 Go 名
+	ProtoName string // 字段原始名
+	GoType    string // Go 类型
+	FieldNum  int32  // proto 字段编号
+	IsUnique  bool   // 是否唯一索引
 }
 
 func buildStoreData(table *TableIR) storeData {

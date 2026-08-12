@@ -39,9 +39,9 @@ func TestProtoTypeToGo(t *testing.T) {
 
 func TestResolveGoPackage(t *testing.T) {
 	tests := []struct {
-		name    string
-		goPkg   string
-		want    string
+		name  string
+		goPkg string
+		want  string
 	}{
 		{"full path with semicolon", "github.com/mogumc/sqlitex/generated;genpkg", "genpkg"},
 		{"full path no semicolon", "github.com/mogumc/sqlitex/generated", "generated"},
@@ -186,10 +186,14 @@ func TestBuildFieldIRRepeated(t *testing.T) {
 }
 
 // helpers
-func strPtr(s string) *string                       { return &s }
-func intPtr(n int32) *int32                         { return &n }
-func typPtr(t descriptorpb.FieldDescriptorProto_Type) *descriptorpb.FieldDescriptorProto_Type { return &t }
-func labelPtr(l descriptorpb.FieldDescriptorProto_Label) *descriptorpb.FieldDescriptorProto_Label { return &l }
+func strPtr(s string) *string { return &s }
+func intPtr(n int32) *int32   { return &n }
+func typPtr(t descriptorpb.FieldDescriptorProto_Type) *descriptorpb.FieldDescriptorProto_Type {
+	return &t
+}
+func labelPtr(l descriptorpb.FieldDescriptorProto_Label) *descriptorpb.FieldDescriptorProto_Label {
+	return &l
+}
 
 func TestParseTTL(t *testing.T) {
 	tests := []struct {
@@ -280,16 +284,16 @@ func TestBuildTableIRTTL(t *testing.T) {
 
 	// 非法 TTL 应报错
 	m := &descriptorpb.DescriptorProto{
-		Name: strPtr("Bad"),
+		Name:  strPtr("Bad"),
 		Field: msg.Field,
 	}
 	badOpt := &sqlitexpb.FieldOption{Index: sqlitexpb.IndexOption_INDEX_NONE}
 	badOpt.Ttl = "-1s"
 	badField := &descriptorpb.FieldDescriptorProto{
-		Name:   strPtr("token"),
-		Number: intPtr(2),
-		Type:   typPtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
-		Label:  labelPtr(descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL),
+		Name:    strPtr("token"),
+		Number:  intPtr(2),
+		Type:    typPtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
+		Label:   labelPtr(descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL),
 		Options: &descriptorpb.FieldOptions{},
 	}
 	proto.SetExtension(badField.Options, sqlitexpb.E_Field, badOpt)
