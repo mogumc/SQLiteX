@@ -112,7 +112,7 @@ store.Update(&Session{Id: 1, Token: "new-token", ...}) // TTL 重新从 now 起�
 
 ## 9. 测试覆盖
 
-`example/ttluser/ttl_test.go` 7 项集成测试：
+`internal/testmodels/session_integration_test.go` 8 项集成测试：
 
 | 测试 | 验证 |
 |------|------|
@@ -123,3 +123,4 @@ store.Update(&Session{Id: 1, Token: "new-token", ...}) // TTL 重新从 now 起�
 | `TestTTLLazyDeleteCleansIndex` | 惰性删除同步清理索引 |
 | `TestPurgeExpired` | Purge 清理过期记录 + 索引 |
 | `TestPurgeExpiredSkippsFresh` | Purge 不删未过期 |
+| `TestSessionMetaHeaderFormat` | 序列化首 8 字节为 expiresAt（Meta Header） |

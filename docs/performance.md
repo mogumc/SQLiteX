@@ -50,7 +50,7 @@
 复现基准：
 
 ```bash
-go test -bench . -run=^$ ./example/generated/
+go test -bench . -run=^$ ./internal/testmodels/
 ```
 
 ## 4. 消费者优化（已实现）

@@ -111,13 +111,13 @@ TTL 时间字符串支持 Go `time.ParseDuration` 格式：`"30s"`、`"5m"`、`"
 
 ```bash
 protoc \
-  --go_out=paths=source_relative:example/generated \
-  --sqlitex_out=package=generated,paths=source_relative:example/generated \
+  --go_out=paths=source_relative:example/demo \
+  --sqlitex_out=package=demo,paths=source_relative:example/demo \
   --proto_path=proto --proto_path=example \
-  example/user.proto
+  example/demo.proto
 ```
 
-每个 `message User` 生成一个 `User_sqlitex.go`，包含：
+所有 `message`（一张 proto 可声明多张表）合并生成一个 `*_sqlitex.go` 文件，包含：
 
 | 产物 | 说明 |
 |------|------|
@@ -125,7 +125,7 @@ protoc \
 | `UserStore` | 强类型 CRUD 接口 + 实现 |
 | `NewMockUserStore()` | 内存 Mock，用于单元测试 |
 | `UserQuery` | 流式 Fluent 查询 API |
-| `SerializeWithExpiry()` / `DeserializeUserMeta()` | TTL 表专用，Meta Header 时间戳 |
+| `SerializeWithExpiry()` / `DeserializeUserMeta()` | **仅 TTL 表生成**，Meta Header 时间戳；无 TTL 表生成旧格式（无 8B header，兼容历史数据） |
 
 ## 7. 命名规范
 

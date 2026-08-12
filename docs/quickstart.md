@@ -11,7 +11,7 @@ syntax = "proto3";
 
 package example;
 
-option go_package = "github.com/mogumc/sqlitex/example/generated";
+option go_package = "github.com/mogumc/sqlitex/example/demo";
 
 import "sqlitex/options.proto";
 
@@ -40,13 +40,13 @@ go build -o protoc-gen-sqlitex.exe ./cmd/protoc-gen-sqlitex/
 
 # 生成 Go 代码 + SQLiteX 代码
 PATH=".:$PATH" protoc \
-  --go_out=paths=source_relative:example/generated \
-  --sqlitex_out=package=generated,paths=source_relative:example/generated \
+  --go_out=paths=source_relative:example/demo \
+  --sqlitex_out=package=demo,paths=source_relative:example/demo \
   --proto_path=proto --proto_path=example \
-  example/user.proto
+  example/demo.proto
 ```
 
-产物：`example/generated/User.pb.go` + `example/generated/User_sqlitex.go`。
+产物：`example/demo/demo.pb.go` + `example/demo/User_sqlitex.go`（含全部表的 Store/Query/Mock）。
 
 > 依赖：`protoc`、`protoc-gen-go`。插件需在 PATH 中。
 
@@ -59,7 +59,7 @@ import (
     "log"
 
     "github.com/mogumc/sqlitex"
-    "github.com/mogumc/sqlitex/example/generated"
+    "github.com/mogumc/sqlitex/example/demo"
 )
 
 func main() {
@@ -71,7 +71,7 @@ func main() {
     if err != nil { log.Fatal(err) }
     defer db.Close()
 
-    store := generated.NewUserStore(db)
+    store := demo.NewUserStore(db)
     // ... CRUD
 }
 ```
@@ -80,7 +80,7 @@ func main() {
 
 ```go
 // 创建
-err := store.Create(&generated.User{
+err := store.Create(&demo.User{
     Id:        1,
     Name:      "Alice",
     Email:     "alice@example.com",
@@ -104,7 +104,7 @@ err = store.Delete(1)
 ## 5. 查询
 
 ```go
-q := generated.NewUserQuery(db)
+q := demo.NewUserQuery(db)
 
 // 按唯一索引精确查
 users, _ := q.WhereEmail("=", "alice@example.com").Exec()
@@ -135,16 +135,18 @@ message Session {
 
   int64 id = 1 [(sqlitex.field).primary_key = true];
   string token = 2 [(sqlitex.field).ttl = "1s"]; // 1 秒过期
-  string user_id = 3;
+  string user_id = 3 [(sqlitex.field).index = INDEX_NORMAL];
   bool active = 4;
 }
 ```
 
+Session 声明在同一个 `demo.proto`（与 User 同文件同包），生成代码位于 `example/demo/`：
+
 ```go
-store := ttluser.NewSessionStore(db)
+store := demo.NewSessionStore(db)
 
 // 写入，1 秒后过期
-store.Create(&ttluser.Session{Id: 1, Token: "abc", UserId: "u1"})
+store.Create(&demo.Session{Id: 1, Token: "abc", UserId: "u1"})
 
 // 过期后 Get 返回 nil（自动惰性删除数据行 + 索引行）
 time.Sleep(1500 * time.Millisecond)
@@ -177,7 +179,7 @@ go func() {
 go test ./...
 
 # 性能基准
-go test -bench . -run=^$ ./example/generated/
+go test -bench . -run=^$ ./internal/testmodels/
 ```
 
 更多细节：
