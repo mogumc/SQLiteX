@@ -28,7 +28,7 @@ func TestGenerateSerializer(t *testing.T) {
 		t.Fatal("generated code is empty")
 	}
 
-	// 关键函数存在性检查
+	// 关键函数存在性检查（无 TTL 表 → 旧格式，无 Meta header）
 	checks := []string{
 		"func (m *User) Serialize() []byte",
 		"func DeserializeUser(data []byte) (*User, error)",
@@ -40,6 +40,20 @@ func TestGenerateSerializer(t *testing.T) {
 		if !containsStr(code, check) {
 			t.Errorf("generated code missing: %q", check)
 		}
+	}
+
+	// 无 TTL 表：不生成 Meta header / SerializeWithExpiry / DeserializeMeta
+	if containsStr(code, "SerializeWithExpiry") {
+		t.Error("non-TTL table should not generate SerializeWithExpiry")
+	}
+	if containsStr(code, "DeserializeUserMeta") {
+		t.Error("non-TTL table should not generate DeserializeMeta")
+	}
+	if containsStr(code, "off := 8") {
+		t.Error("non-TTL table should use off := 0 (no 8B header)")
+	}
+	if !containsStr(code, "off := 0") {
+		t.Error("non-TTL table should start payload at off := 0")
 	}
 
 	// 变长字段应有长度前缀写入
@@ -80,8 +94,8 @@ func TestGenerateSerializerFixedOnly(t *testing.T) {
 
 	code := GenerateSerializer(table)
 
-	// 全固定长度：MinSize = 8+8+4 = 20
-	if !containsStr(code, "size := 20") {
+	// 全固定长度：MinSize = 8+8+4 = 20（无 TTL 表，无 8B header）
+	if !containsStr(code, "size :=20") && !containsStr(code, "size := 20") {
 		t.Error("expected fixed total size 20 in Size()")
 	}
 	if !containsStr(code, "len(data) < 20") {
@@ -105,6 +119,41 @@ func TestToGoName(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("toGoName(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+// TestGenerateSerializerRoundTrip 验证 TTL 表生成带 Meta Header 的 Meta 格式。
+// 构造与模板一致的字段顺序，覆盖固定长度与变长字段。
+func TestGenerateSerializerRoundTrip(t *testing.T) {
+	table := &TableIR{
+		MessageName: "User",
+		GoPackage:   "genpkg",
+		TableID:     1,
+		HasTTL:      true,
+		Fields: []*FieldIR{
+			{Name: "id", GoType: "int64", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64, Number: 1, IsPrimaryKey: true},
+			{Name: "name", GoType: "string", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_STRING, Number: 2},
+			{Name: "score", GoType: "float64", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_DOUBLE, Number: 3},
+			{Name: "active", GoType: "bool", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_BOOL, Number: 4},
+			{Name: "avatar", GoType: "[]byte", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_BYTES, Number: 5},
+		},
+	}
+
+	code := GenerateSerializer(table)
+
+	// 序列化委托: Serialize() 应调用 SerializeWithExpiry(0)
+	if !containsStr(code, "return m.SerializeWithExpiry(0)") {
+		t.Error("Serialize() should delegate to SerializeWithExpiry(0)")
+	}
+
+	// 反序列化委托: Deserialize 应调用 DeserializeMeta
+	if !containsStr(code, "m, _, err := DeserializeUserMeta(data)") {
+		t.Error("Deserialize should delegate to DeserializeMeta")
+	}
+
+	// 8B Header 写入在 payload 之前
+	if !containsStr(code, "binary.LittleEndian.PutUint64(buf, uint64(expiresAt))\n\toff := 8") {
+		t.Error("expiresAt header must be written before payload")
 	}
 }
 

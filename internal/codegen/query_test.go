@@ -127,3 +127,93 @@ func TestGenerateQueryStringLike(t *testing.T) {
 		t.Error("string field should support LIKE with strings.Contains")
 	}
 }
+
+// TestGenerateQueryNoTTL 验证无 TTL 表不生成 TTL 相关分支。
+func TestGenerateQueryNoTTL(t *testing.T) {
+	table := &TableIR{
+		MessageName: "User",
+		GoPackage:   "genpkg",
+		TableID:     1,
+		PrimaryKey: &FieldIR{
+			Name:      "id",
+			GoName:    "Id",
+			GoType:    "int64",
+			ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64,
+			Number:    1,
+		},
+		Fields: []*FieldIR{
+			{Name: "id", GoType: "int64", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64, Number: 1, IsPrimaryKey: true},
+			{Name: "name", GoType: "string", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_STRING, Number: 2},
+		},
+	}
+
+	code, err := GenerateQuery(table)
+	if err != nil {
+		t.Fatalf("GenerateQuery failed: %v", err)
+	}
+
+	// 无 TTL: 不生成 TTL 分支
+	if strings.Contains(code, "DeserializeUserMeta") {
+		t.Error("non-TTL query should use plain Deserialize")
+	}
+	if strings.Contains(code, "time.Now().UnixNano()") {
+		t.Error("non-TTL query should not check expiry")
+	}
+	if strings.Contains(code, "deleteUserWithIndexes") {
+		t.Error("non-TTL query should not lazy-delete")
+	}
+	// 无 TTL 时不应 import time
+	if strings.Contains(code, "\"time\"") {
+		t.Error("non-TTL query should not import time")
+	}
+}
+
+// TestGenerateQueryTTL 验证 TTL 表在索引扫描与全表扫描路径均含惰性删除。
+func TestGenerateQueryTTL(t *testing.T) {
+	table := &TableIR{
+		MessageName: "Session",
+		GoPackage:   "genpkg",
+		TableID:     3,
+		HasTTL:      true,
+		PrimaryKey: &FieldIR{
+			Name:      "id",
+			GoName:    "Id",
+			GoType:    "int64",
+			ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64,
+			Number:    1,
+		},
+		IndexedFields: []*FieldIR{
+			{Name: "user_id", GoName: "UserId", GoType: "string", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_STRING, Number: 3},
+		},
+		Fields: []*FieldIR{
+			{Name: "id", GoType: "int64", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64, Number: 1, IsPrimaryKey: true},
+			{Name: "token", GoType: "string", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_STRING, Number: 2},
+			{Name: "user_id", GoType: "string", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_STRING, Number: 3},
+		},
+	}
+
+	code, err := GenerateQuery(table)
+	if err != nil {
+		t.Fatalf("GenerateQuery failed: %v", err)
+	}
+
+	// TTL 表应 import time
+	if !strings.Contains(code, "\"time\"") {
+		t.Error("TTL query should import time")
+	}
+
+	// 全表扫描路径: DeserializeMeta + 过期判断 + 惰性删除
+	if !strings.Contains(code, "m, expiresAt, err := DeserializeSessionMeta(value)") {
+		t.Error("TTL full scan should use DeserializeMeta")
+	}
+	if strings.Count(code, "time.Now().UnixNano() > expiresAt") != 2 {
+		t.Errorf("expected expiry check in both execIndexed and execFullScan, got %d",
+			strings.Count(code, "time.Now().UnixNano() > expiresAt"))
+	}
+	if !strings.Contains(code, "deleteSessionWithIndexes(q.db, 3, key, m)") {
+		t.Error("TTL full scan should lazy-delete expired record")
+	}
+	if !strings.Contains(code, "deleteSessionWithIndexes(q.db, 3, dataKey, m)") {
+		t.Error("TTL indexed scan should lazy-delete expired record")
+	}
+}

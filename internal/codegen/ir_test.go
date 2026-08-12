@@ -2,10 +2,11 @@ package codegen
 
 import (
 	"testing"
+	"time"
 
+	sqlitexpb "github.com/mogumc/sqlitex/proto/sqlitex"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
-
-
 )
 
 func TestProtoTypeToGo(t *testing.T) {
@@ -189,3 +190,111 @@ func strPtr(s string) *string                       { return &s }
 func intPtr(n int32) *int32                         { return &n }
 func typPtr(t descriptorpb.FieldDescriptorProto_Type) *descriptorpb.FieldDescriptorProto_Type { return &t }
 func labelPtr(l descriptorpb.FieldDescriptorProto_Label) *descriptorpb.FieldDescriptorProto_Label { return &l }
+
+func TestParseTTL(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"seconds", "30s", 30 * time.Second, false},
+		{"minutes", "5m", 5 * time.Minute, false},
+		{"hours", "24h", 24 * time.Hour, false},
+		{"days", "7d", 7 * 24 * time.Hour, false},
+		{"milliseconds", "500ms", 500 * time.Millisecond, false},
+		{"zero", "0s", 0, true},
+		{"negative", "-5m", 0, true},
+		{"negative day", "-1d", 0, true},
+		{"bad day value", "abc d", 0, true},
+		{"empty", "", 0, true},
+		{"garbage", "abc", 0, true},
+		{"bad day suffix", "1.5d", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseTTL(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseTTL(%q) expected error, got %v", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("parseTTL(%q) unexpected error: %v", tt.input, err)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("parseTTL(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildTableIRTTL 验证 buildTableIR 从字段 ttl option 提取记录级 TTL。
+func TestBuildTableIRTTL(t *testing.T) {
+	msg := &descriptorpb.DescriptorProto{
+		Name: strPtr("Session"),
+		Field: []*descriptorpb.FieldDescriptorProto{
+			{
+				Name:   strPtr("id"),
+				Number: intPtr(1),
+				Type:   typPtr(descriptorpb.FieldDescriptorProto_TYPE_INT64),
+				Label:  labelPtr(descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL),
+			},
+			{
+				Name:   strPtr("token"),
+				Number: intPtr(2),
+				Type:   typPtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
+				Label:  labelPtr(descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL),
+			},
+		},
+	}
+	tableOpt := &sqlitexpb.TableOption{PrimaryKey: "id"}
+
+	// 无 TTL
+	table, err := buildTableIR(msg, tableOpt, "genpkg", 1)
+	if err != nil {
+		t.Fatalf("buildTableIR no-ttl: %v", err)
+	}
+	if table.HasTTL {
+		t.Error("expected HasTTL=false without ttl option")
+	}
+
+	// 带 TTL option（通过 field option 注入）
+	msg.Field[1].Options = &descriptorpb.FieldOptions{}
+	opt := &sqlitexpb.FieldOption{Index: sqlitexpb.IndexOption_INDEX_NONE}
+	opt.Ttl = "1s"
+	proto.SetExtension(msg.Field[1].Options, sqlitexpb.E_Field, opt)
+
+	table, err = buildTableIR(msg, tableOpt, "genpkg", 1)
+	if err != nil {
+		t.Fatalf("buildTableIR with ttl: %v", err)
+	}
+	if !table.HasTTL {
+		t.Fatal("expected HasTTL=true with ttl option")
+	}
+	if table.TTL != time.Second {
+		t.Errorf("TTL = %v, want %v", table.TTL, time.Second)
+	}
+
+	// 非法 TTL 应报错
+	m := &descriptorpb.DescriptorProto{
+		Name: strPtr("Bad"),
+		Field: msg.Field,
+	}
+	badOpt := &sqlitexpb.FieldOption{Index: sqlitexpb.IndexOption_INDEX_NONE}
+	badOpt.Ttl = "-1s"
+	badField := &descriptorpb.FieldDescriptorProto{
+		Name:   strPtr("token"),
+		Number: intPtr(2),
+		Type:   typPtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
+		Label:  labelPtr(descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL),
+		Options: &descriptorpb.FieldOptions{},
+	}
+	proto.SetExtension(badField.Options, sqlitexpb.E_Field, badOpt)
+	m.Field[1] = badField
+	if _, err := buildTableIR(m, tableOpt, "genpkg", 1); err == nil {
+		t.Error("expected error for negative TTL")
+	}
+}
