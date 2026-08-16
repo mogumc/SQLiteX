@@ -120,7 +120,5 @@ _目标： 补齐企业级/生产环境所需的可观测性、数据生命周�
 *   **边缘数据同步 (Edge Sync)**：探索基于 WAL 变更流（Change Stream）的轻量级主从同步协议，适配云边协同场景。
 *   **多语言 SDK 扩展**：通过 FFI 或 gRPC 网关，将 SQLiteX 的能力暴露给 Rust/C++ 或前端 Node.js 环境。
 
-## _Roadmap Phase 0-3 全部交付，v1.0.0 预发布（pre-release）就绪：TTL 生命周期、Prometheus 可观测性、零停机热备份、Web Admin 面板（`cmd/sqlitex-admin`）与崩溃恢复混沌测试均已落地并附带测试。长期演进方向按需推进。_
-
 ## License
 MIT License
