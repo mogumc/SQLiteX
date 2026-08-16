@@ -61,6 +61,21 @@ go build -o sqlitex-admin ./cmd/sqlitex-admin
 
 只读打开保证面板误操作不可能污染生产数据。Key 以「尽力可读」形式展示（不可打印字节转 `\xNN`）。
 
+### 前端独立编译与嵌入
+
+前端是独立工程（`cmd/sqlitex-admin/web`，Vite + 原生 JS，无运行时框架依赖）：
+
+```bash
+cd cmd/sqlitex-admin/web
+npm install && npm run build   # 产物输出 web/dist，go:embed 嵌入二进制
+```
+
+- `web/dist` 随仓库提交：**Go 编译不依赖 Node**，仅前端改动后需重新构建。
+- 二进制单文件分发：UI 全部内嵌，运行期零外部文件依赖。
+- 前后端独立迭代开发：`npm run dev` 起 Vite 热更新服务（5173），
+  `/api`、`/schema` 自动代理到 Go 服务（默认 8080，`SQLITEX_ADMIN_API` 可覆盖），
+  详见 `web/README.md`。
+
 ## 3. 崩溃恢复与数据一致性
 
 SQLiteX 的持久性由 Pebble WAL 保证，已在测试中覆盖三类故障场景（见 `stability_test.go`）：

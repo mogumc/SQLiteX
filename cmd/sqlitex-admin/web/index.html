@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SQLiteX Admin</title>
+</head>
+<body>
+  <header><h1>SQLiteX Admin</h1><span id="dir"></span></header>
+  <main>
+    <div class="cards" id="stats"></div>
+    <div class="bar">
+      <input type="text" id="prefix" placeholder="key 前缀（TableID+PK，留空浏览全库）">
+      <button onclick="loadKeys()">扫描</button>
+      <button class="ghost" onclick="window.open('/schema','_blank')" id="schemaBtn" style="display:none">Schema</button>
+    </div>
+    <table>
+      <thead><tr><th>Key</th><th style="width:90px">Size</th><th>Value 预览</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="3" class="hint">输入前缀后点击「扫描」</td></tr></tbody>
+    </table>
+    <div class="bar" style="margin-top:12px">
+      <button class="ghost" id="prev" onclick="prevPage()" style="visibility:hidden">上一页</button>
+      <button class="ghost" id="next" onclick="nextPage()" style="visibility:hidden">下一页</button>
+      <span class="hint" id="pageinfo"></span>
+    </div>
+    <div id="detail"><h3 id="dTitle"></h3><pre id="dBody"></pre></div>
+  </main>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

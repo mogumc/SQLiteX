@@ -15,7 +15,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -49,8 +49,13 @@ func main() {
 		protoPath: *protoPath,
 	}
 
+	uiFS, err := embeddedUI()
+	if err != nil {
+		log.Fatalf("embed ui: %v", err)
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.handleIndex)
+	mux.Handle("/", srv.handleUI(uiFS))
 	mux.HandleFunc("/api/stats", srv.handleStats)
 	mux.HandleFunc("/api/keys", srv.handleKeys)
 	mux.HandleFunc("/api/key", srv.handleKey)
@@ -94,13 +99,20 @@ type statsResponse struct {
 	ReadOnly       bool   `json:"read_only"`
 }
 
-func (s *adminServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	io.WriteString(w, indexHTML)
+// handleUI 服务嵌入的前端静态资源（web/dist）。
+// 静态资源由 Vite 独立构建（见 web/README.md），go:embed 嵌入二进制。
+// 未命中的路径回退到 index.html（SPA 语义）。
+func (s *adminServer) handleUI(uiFS fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rel := strings.TrimPrefix(r.URL.Path, "/")
+		if rel != "" {
+			if _, err := fs.Stat(uiFS, rel); err != nil {
+				r.URL.Path = "/" // SPA fallback：未知路径渲染入口页
+			}
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 func (s *adminServer) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -292,132 +304,3 @@ func httpError(w http.ResponseWriter, code int, err error) {
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 }
-
-// indexHTML 是内嵌的单页面板（无外部依赖，离线可用）。
-const indexHTML = `<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<title>SQLiteX Admin</title>
-<style>
-  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --fg:#d7dce4; --dim:#8b93a3; --acc:#4f8cff; --mono:ui-monospace,Consolas,monospace; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.6 system-ui,"Segoe UI",sans-serif; }
-  header { padding:14px 24px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; }
-  header h1 { font-size:18px; margin:0; }
-  header span { color:var(--dim); font-size:12px; }
-  main { padding:20px 24px; max-width:1100px; margin:0 auto; }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-bottom:20px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
-  .card .k { color:var(--dim); font-size:12px; }
-  .card .v { font-family:var(--mono); font-size:18px; margin-top:2px; }
-  .bar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
-  input[type=text] { background:var(--card); border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:8px 10px; font-family:var(--mono); min-width:340px; }
-  button { background:var(--acc); border:0; color:#fff; border-radius:6px; padding:8px 16px; cursor:pointer; }
-  button.ghost { background:var(--card); border:1px solid var(--line); color:var(--fg); }
-  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-  th,td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:13px; }
-  th { color:var(--dim); font-weight:500; background:#1c2029; }
-  td.num { text-align:right; }
-  tr.row { cursor:pointer; }
-  tr.row:hover { background:#1e2530; }
-  #detail { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; margin-top:16px; display:none; }
-  #detail h3 { margin:0 0 8px; font-size:13px; color:var(--dim); }
-  #detail pre { margin:0; white-space:pre-wrap; word-break:break-all; font-family:var(--mono); font-size:12px; color:#a9d1ff; max-height:320px; overflow:auto; }
-  .hint { color:var(--dim); font-size:12px; }
-</style>
-</head>
-<body>
-<header><h1>SQLiteX Admin</h1><span id="dir"></span></header>
-<main>
-  <div class="cards" id="stats"></div>
-  <div class="bar">
-    <input type="text" id="prefix" placeholder="key 前缀（TableID+PK，留空浏览全库）">
-    <button onclick="loadKeys()">扫描</button>
-    <button class="ghost" onclick="window.open('/schema','_blank')" id="schemaBtn" style="display:none">Schema</button>
-  </div>
-  <table>
-    <thead><tr><th>Key</th><th style="width:90px">Size</th><th>Value 预览</th></tr></thead>
-    <tbody id="rows"><tr><td colspan="3" class="hint">输入前缀后点击「扫描」</td></tr></tbody>
-  </table>
-  <div class="bar" style="margin-top:12px">
-    <button class="ghost" id="prev" onclick="prevPage()" style="visibility:hidden">上一页</button>
-    <button class="ghost" id="next" onclick="nextPage()" style="visibility:hidden">下一页</button>
-    <span class="hint" id="pageinfo"></span>
-  </div>
-  <div id="detail"><h3 id="dTitle"></h3><pre id="dBody"></pre></div>
-</main>
-<script>
-let cursors = [], nextCursor = "", prefix = "";
-const fmtBytes = n => n==null?"-":(n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(2)+" MB");
-const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-
-async function loadStats() {
-  const r = await (await fetch("/api/stats")).json();
-  document.getElementById("dir").textContent = r.dir + " · 只读";
-  const cards = [["磁盘占用",fmtBytes(r.disk_usage_bytes)],["活跃数据",fmtBytes(r.live_bytes)],
-    ["WAL",fmtBytes(r.wal_size_bytes)],["MemTable",fmtBytes(r.memtable_bytes)],["SSTable 数",r.sstable_count]];
-  document.getElementById("stats").innerHTML = cards.map(c=>'<div class="card"><div class="k">'+c[0]+'</div><div class="v">'+c[1]+'</div></div>').join("");
-  if (await fetch("/schema").then(x=>x.ok).catch(()=>false)) document.getElementById("schemaBtn").style.display="inline-block";
-}
-
-function loadKeys() {
-  prefix = document.getElementById("prefix").value;
-  cursors = [""];
-  fetchPage("");
-}
-
-async function fetchPage(cur) {
-  const u = new URL("/api/keys", location);
-  u.searchParams.set("prefix", prefix);
-  if (cur) u.searchParams.set("cursor", cur);
-  const r = await (await fetch(u)).json();
-  const tb = document.getElementById("rows");
-  if (!r.entries || !r.entries.length) {
-    tb.innerHTML = '<tr><td colspan="3" class="hint">无数据</td></tr>';
-  } else {
-    tb.innerHTML = r.entries.map(e =>
-      '<tr class="row" onclick="showDetail(\''+e.key_b64+'\')"><td>'+esc(e.key)+'</td><td class="num">'+e.size+'</td><td class="hint">'+esc(e.preview)+'</td></tr>').join("");
-  }
-  nextCursor = r.next_cursor || "";
-  document.getElementById("next").style.visibility = nextCursor ? "visible" : "hidden";
-  document.getElementById("prev").style.visibility = cursors.length > 1 ? "visible" : "hidden";
-  document.getElementById("pageinfo").textContent = (r.entries ? r.entries.length : 0) + " 条 / 页";
-}
-
-function nextPage() {
-  if (!nextCursor) return;
-  cursors.push(nextCursor);
-  fetchPage(nextCursor);
-}
-
-function prevPage() {
-  if (cursors.length <= 1) return;
-  cursors.pop();
-  fetchPage(cursors[cursors.length - 1]);
-}
-
-async function showDetail(b64) {
-  const r = await (await fetch("/api/key?k=" + b64)).json();
-  const box = document.getElementById("detail");
-  box.style.display = "block";
-  document.getElementById("dTitle").textContent = "记录详情 · " + (r.key_print || r.key_hex) + " · " + r.size + " 字节";
-  document.getElementById("dBody").textContent = r.value_hex ? hexDump(r.value_hex, r.value_print) : "(空)";
-}
-
-function hexDump(hexStr, printStr) {
-  const bytes = new Uint8Array(hexStr.match(/.{2}/g).map(h => parseInt(h, 16)));
-  let out = "";
-  for (let off = 0; off < bytes.length; off += 16) {
-    const slice = bytes.subarray(off, off + 16);
-    const hex = Array.from(slice).map(b => b.toString(16).padStart(2, "0")).join(" ");
-    out += off.toString(16).padStart(8, "0") + "  " + hex + "\n";
-  }
-  if (printStr) out += "\n可读形式: " + printStr;
-  return out;
-}
-
-loadStats();
-</script>
-</body>
-</html>`
