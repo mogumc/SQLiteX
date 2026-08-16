@@ -41,6 +41,9 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+	if *maxBody <= 0 {
+		log.Fatalf("invalid -maxbody %d: must be positive (default %d)", *maxBody, defaultMaxBodyBytes)
+	}
 	if err := warnIfExposed(*addr); err != nil {
 		log.Printf("解析监听地址失败，按可能暴露处理: %v", err)
 	}
