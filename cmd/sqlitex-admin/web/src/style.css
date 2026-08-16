@@ -140,3 +140,9 @@ table.fields td.val { word-break: break-all; max-width: 520px; white-space: pre-
 .pk { color: #4f8cff; font-size: 11px; }
 
 select { background: var(--card); border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 8px 10px; font-family: var(--mono); }
+
+/* 标准表格视图（分表数据浏览） */
+.thtype { color: var(--dim); font-weight: 400; font-size: 11px; margin-left: 4px; }
+td.pkcell { color: #4f8cff; white-space: nowrap; }
+td.cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+input[type=text]:disabled { opacity: 0.4; cursor: not-allowed; }

@@ -101,7 +101,14 @@ function renderSchema() {
     schema.tables.map((t) => '<option value="' + t.table_id + '">' + esc(t.message) + '</option>').join('')
 }
 
-// ---- Key 浏览（schema 感知） ----
+// ---- Key 浏览（schema 感知：选表 = 标准表格视图，全库 = 原始字节视图） ----
+
+// 当前选中表对象（null = 全库原始模式）
+function currentTable() {
+  if (!schema) return null
+  const id = document.getElementById('tableSel').value
+  return schema.tables.find((t) => String(t.table_id) === id) || null
+}
 
 function loadKeys() {
   prefix = document.getElementById('prefix').value
@@ -110,26 +117,100 @@ function loadKeys() {
 }
 
 async function fetchPage(cur) {
+  const tbl = currentTable()
   const u = new URL('/api/keys', location)
-  const tableID = document.getElementById('tableSel').value
-  if (tableID) u.searchParams.set('table_id', tableID)
-  else u.searchParams.set('prefix', prefix)
+  if (tbl) {
+    u.searchParams.set('table_id', tbl.table_id)
+    u.searchParams.set('decode', '1')
+  } else {
+    u.searchParams.set('prefix', prefix)
+  }
   if (cur) u.searchParams.set('cursor', cur)
   const r = await (await fetch(u)).json()
-  const tb = document.getElementById('rows')
-  if (!r.entries || !r.entries.length) {
-    tb.innerHTML = '<tr><td colspan="4" class="hint">无数据</td></tr>'
-  } else {
-    tb.innerHTML = r.entries.map((e) => '<tr class="row" onclick="showDetail(\'' + e.key_b64 + '\')">' +
-      '<td>' + structCell(e.decoded) + '</td>' +
-      '<td>' + esc(e.key) + '</td>' +
-      '<td class="num">' + e.size + '</td>' +
-      '<td class="hint">' + esc(e.preview) + '</td></tr>').join('')
-  }
+  if (tbl) renderGrid(tbl, r)
+  else renderRaw(r)
   nextCursor = r.next_cursor || ''
   document.getElementById('next').style.visibility = nextCursor ? 'visible' : 'hidden'
   document.getElementById('prev').style.visibility = cursors.length > 1 ? 'visible' : 'hidden'
   document.getElementById('pageinfo').textContent = (r.entries ? r.entries.length : 0) + ' 条 / 页'
+}
+
+// 标准表格视图：列 = PK + schema 字段（+ TTL），行 = 字段级解码值
+function renderGrid(tbl, r) {
+  const head = document.getElementById('rowsHead')
+  const tb = document.getElementById('rows')
+  const cols = ['<th style="width:90px">' + esc(tbl.primary_key.name) + '<span class="thtype"> ' + esc(tbl.primary_key.type) + '</span></th>']
+    .concat(
+      tbl.fields
+        .filter((f) => !f.primary)
+        .map((f) => '<th>' + esc(f.name) + '<span class="thtype"> ' + esc(f.type) + '</span></th>'),
+    )
+  if (tbl.has_ttl) cols.push('<th style="width:150px">TTL</th>')
+  head.innerHTML = '<tr>' + cols.join('') + '</tr>'
+
+  if (!r.entries || !r.entries.length) {
+    tb.innerHTML = '<tr><td colspan="' + cols.length + '" class="hint">无数据</td></tr>'
+    return
+  }
+  tb.innerHTML = r.entries
+    .map((e) => {
+      const cells = []
+      const d = e.decoded || {}
+      cells.push('<td class="pkcell">' + esc(fmtVal(d.pk)) + '</td>')
+      const byName = {}
+      for (const f of (e.row && e.row.fields) || []) byName[f.name] = f
+      for (const f of tbl.fields.filter((x) => !x.primary)) {
+        const v = byName[f.name]
+        cells.push('<td class="cell" title="' + esc(v ? v.value : '') + '">' +
+          (v ? esc(cellVal(v)) : '<span class="hint">—</span>') + '</td>')
+      }
+      if (tbl.has_ttl) {
+        const row = e.row || {}
+        cells.push('<td>' + (row.expires_at
+          ? esc(row.expires_at.replace('T', ' ').split('.')[0]) + ' ' +
+            (row.expired ? '<span class="badge warn">已过期</span>' : '<span class="badge ok">存活</span>')
+          : '<span class="hint">—</span>') + '</td>')
+      }
+      return '<tr class="row" onclick="showDetail(\'' + e.key_b64 + '\')">' + cells.join('') + '</tr>'
+    })
+    .join('')
+}
+
+// 字段单元格：截断值显示省略标记
+function cellVal(f) {
+  return f.value.length > 64 ? f.value.slice(0, 64) + '…' : f.value
+}
+
+// 原始字节视图（全库 / 未导入 schema）
+function renderRaw(r) {
+  document.getElementById('rowsHead').innerHTML =
+    '<tr><th style="width:150px">结构</th><th>Key</th><th style="width:80px">Size</th><th>Value 预览</th></tr>'
+  const tb = document.getElementById('rows')
+  if (!r.entries || !r.entries.length) {
+    tb.innerHTML = '<tr><td colspan="4" class="hint">无数据</td></tr>'
+    return
+  }
+  tb.innerHTML = r.entries
+    .map(
+      (e) =>
+        '<tr class="row" onclick="showDetail(\'' +
+        e.key_b64 +
+        '\')"><td>' +
+        structCell(e.decoded) +
+        '</td><td>' +
+        esc(e.key) +
+        '</td><td class="num">' +
+        e.size +
+        '</td><td class="hint">' +
+        esc(e.preview) +
+        '</td></tr>',
+    )
+    .join('')
+}
+
+// 表选择切换时同步前缀输入框的可用性（表模式不使用前缀）
+function syncModeUI() {
+  document.getElementById('prefix').disabled = !!currentTable()
 }
 
 // 结构列：data → 表名+PK；index → 表名+索引字段；无 schema → —
@@ -210,6 +291,10 @@ function hexDump(hexStr, printStr) {
 document.getElementById('protoFile').addEventListener('change', (e) => {
   if (e.target.files.length) importSchema(e.target.files[0])
 })
+
+// 切表时同步模式 UI（表模式禁用前缀输入）
+document.getElementById('tableSel').addEventListener('change', syncModeUI)
+syncModeUI()
 
 // inline onclick 需要
 window.loadKeys = loadKeys

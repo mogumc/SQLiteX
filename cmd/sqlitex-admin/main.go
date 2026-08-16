@@ -148,6 +148,14 @@ type keyEntry struct {
 	Size    int         `json:"size"`              // value 字节数
 	Preview string      `json:"preview"`           // value 可打印片段（≤64 字节）
 	Decoded *decodedKey `json:"decoded,omitempty"` // schema 导入后的语义化解码
+	Row     *rowView    `json:"row,omitempty"`     // decode=1 时数据行的字段级解码
+}
+
+// rowView 是数据行在列表视图中的表格化投影（标准表格展示用）。
+type rowView struct {
+	Fields    []decodedField `json:"fields"`
+	ExpiresAt string         `json:"expires_at,omitempty"` // TTL 表专用
+	Expired   bool           `json:"expired,omitempty"`
 }
 
 // keysResponse 是 /api/keys 的分页响应。
@@ -199,9 +207,11 @@ func (s *adminServer) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // handleKeys 按 prefix 前缀扫描 + cursor 游标分页（O(1) Seek，与引擎侧一致）。
 // 参数：prefix（原始字符串）、cursor（base64 的上页末 key）、limit（默认 50，上限 500）、
-// table_id（表过滤：仅扫描该表数据行，与生成代码的表前缀扫描同一物理语义）。
+// table_id（表过滤：仅扫描该表数据行，与生成代码的表前缀扫描同一物理语义）、
+// decode=1（数据行附带字段级解码，供标准表格视图渲染）。
 func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 	prefix := r.URL.Query().Get("prefix")
+	decode := r.URL.Query().Get("decode") == "1"
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n := atoiClamp(v, 1, 500); n > 0 {
@@ -264,6 +274,14 @@ func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		if d := s.schema.decodeKey(k); d.Kind != "unknown" {
 			entry.Decoded = &d
+			// decode=1：数据行附带字段级解码（标准表格视图）。
+			// decodeValue 在本次迭代内完成全部字符串化，iter.Value 生命周期安全。
+			if decode && d.Kind == "data" {
+				if ts := s.schema.tableOf(k); ts != nil {
+					dv := s.schema.decodeValue(ts, v)
+					entry.Row = &rowView{Fields: dv.Fields, ExpiresAt: dv.ExpiresAt, Expired: dv.Expired}
+				}
+			}
 		}
 		resp.Entries = append(resp.Entries, entry)
 	}
