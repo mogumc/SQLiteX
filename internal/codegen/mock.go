@@ -16,10 +16,23 @@ func GenerateMock(table *TableIR) string {
 		mf := mockField{GoName: goName}
 		// bytes 与 repeated 字段必须深拷贝，标量/string 直接赋值。
 		// 不整体复制 struct：protoimpl.MessageState 含锁，vet 报 copies lock。
-		if f.IsRepeated || f.ProtoType == descriptorpb.FieldDescriptorProto_TYPE_BYTES {
-			mf.CopyLine = fmt.Sprintf("dst.%s = append((%s)(nil), src.%s...)", goName, f.GoType, goName)
-		} else {
-			mf.CopyLine = fmt.Sprintf("dst.%s = src.%s", goName, goName)
+		switch {
+		case f.IsRepeated && f.ProtoType == descriptorpb.FieldDescriptorProto_TYPE_BYTES:
+			// [][]byte：外层重建 + 内层逐元素拷贝，避免内层切片共享
+			mf.CopyLines = []string{
+				fmt.Sprintf("dst.%s = make(%s, len(src.%s))", goName, f.GoType, goName),
+				fmt.Sprintf("for i := range src.%s {", goName),
+				fmt.Sprintf("dst.%s[i] = append([]byte(nil), src.%s[i]...)", goName, goName),
+				"}",
+			}
+		case f.IsRepeated || f.ProtoType == descriptorpb.FieldDescriptorProto_TYPE_BYTES:
+			mf.CopyLines = []string{
+				fmt.Sprintf("dst.%s = append((%s)(nil), src.%s...)", goName, f.GoType, goName),
+			}
+		default:
+			mf.CopyLines = []string{
+				fmt.Sprintf("dst.%s = src.%s", goName, goName),
+			}
 		}
 		fields = append(fields, mf)
 	}
@@ -54,10 +67,10 @@ type mockData struct {
 	Fields      []mockField
 }
 
-// mockField 是克隆函数中单个字段的赋值语句载体。
+// mockField 是克隆函数中单个字段的赋值语句载体（多语句用于需内层循环的场景）。
 type mockField struct {
-	GoName   string
-	CopyLine string
+	GoName    string
+	CopyLines []string
 }
 
 var mockTemplate = `package {{.PackageName}}
@@ -88,7 +101,9 @@ func clone{{.EntityName}}(src *{{.EntityName}}) *{{.EntityName}} {
 	}
 	dst := &{{.EntityName}}{}
 	{{- range .Fields}}
-	{{.CopyLine}}
+	{{- range .CopyLines}}
+	{{.}}
+	{{- end}}
 	{{- end}}
 	return dst
 }

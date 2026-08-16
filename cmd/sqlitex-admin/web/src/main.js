@@ -185,6 +185,7 @@ async function showDetail(b64) {
   document.getElementById('dTitle').textContent = ''
   box.innerHTML = '<h3 id="dTitle">' + esc(title) + '</h3>' +
     (semantic || '') +
+    (r.value_truncated ? '<div class="schema-head"><span class="badge warn">原始字节已截断：仅展示前 ' + fmtBytes(Math.floor(r.value_hex.length / 2)) + ' / 共 ' + r.size + ' 字节</span></div>' : '') +
     '<h3 style="margin-top:12px">原始字节</h3><pre id="dBody">' +
     esc(r.value_hex ? hexDump(r.value_hex, r.value_print) : '(空)') + '</pre>'
 }

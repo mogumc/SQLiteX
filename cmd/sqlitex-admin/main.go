@@ -235,12 +235,11 @@ func (s *adminServer) handleKey(w http.ResponseWriter, r *http.Request) {
 	defer closer.Close()
 
 	resp := map[string]any{
-		"key_hex":     hex.EncodeToString(kb),
-		"key_print":   printable(kb),
-		"size":        len(val),
-		"value_hex":   hex.EncodeToString(val),
-		"value_print": printable(val),
+		"key_hex":   hex.EncodeToString(kb),
+		"key_print": printable(kb),
+		"size":      len(val),
 	}
+	resp["value_hex"], resp["value_print"], resp["value_truncated"] = truncateForDump(val)
 
 	// schema 语义化：Key 归属 + Value 逐字段解码
 	if d := s.schema.decodeKey(kb); d.Kind == "data" {
@@ -395,4 +394,26 @@ func httpError(w http.ResponseWriter, code int, err error) {
 func parseUint64(s string) (uint64, bool) {
 	v, err := strconv.ParseUint(s, 10, 64)
 	return v, err == nil
+}
+
+// maxValueDumpBytes / maxValuePrintBytes 原始字节转储的展示上限。
+// 面向「大二进制字段」场景：MB 级 blob 全量 hex 会使 JSON 膨胀 2 倍并卡顿浏览器，
+// 超限时截断并在响应中标记 value_truncated，结构化解码不受影响。
+const (
+	maxValueDumpBytes  = 256 << 10 // hex 转储上限 256KB
+	maxValuePrintBytes = 4 << 10   // 可读预览上限 4KB
+)
+
+// truncateForDump 生成 value 的展示转储（hex + 可读形式），超限截断。
+func truncateForDump(val []byte) (hexStr, printStr string, truncated bool) {
+	dumpVal := val
+	printVal := val
+	if len(val) > maxValueDumpBytes {
+		dumpVal = val[:maxValueDumpBytes]
+		printVal = val[:maxValuePrintBytes]
+		truncated = true
+	} else if len(val) > maxValuePrintBytes {
+		printVal = val[:maxValuePrintBytes]
+	}
+	return hex.EncodeToString(dumpVal), printable(printVal), truncated
 }

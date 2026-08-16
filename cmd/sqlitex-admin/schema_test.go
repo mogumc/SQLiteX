@@ -146,3 +146,42 @@ func appendU32Len(buf []byte, s string) []byte {
 	buf = append(buf, l[:]...)
 	return append(buf, s...)
 }
+
+// TestTruncateForDump 验证大 value 转储截断：小值全量、超限截断并标记。
+func TestTruncateForDump(t *testing.T) {
+	// 小值：全量返回
+	small := []byte("hello")
+	h, p, trunc := truncateForDump(small)
+	if h != "68656c6c6f" || p != "hello" || trunc {
+		t.Errorf("small = %q %q %v, want full dump", h, p, trunc)
+	}
+
+	// 中值（>4KB 打印上限，<256KB hex 上限）：hex 全量、print 截断
+	mid := make([]byte, 8<<10)
+	for i := range mid {
+		mid[i] = 'a'
+	}
+	h, p, trunc = truncateForDump(mid)
+	if len(h) != 2*len(mid) || trunc {
+		t.Errorf("mid hex len = %d, trunc = %v, want full hex", len(h), trunc)
+	}
+	if len(p) != maxValuePrintBytes {
+		t.Errorf("mid print len = %d, want %d", len(p), maxValuePrintBytes)
+	}
+
+	// 大值（>256KB）：hex 截断到上限并标记（用可打印字节，printable 不转义）
+	big := make([]byte, maxValueDumpBytes+123)
+	for i := range big {
+		big[i] = 'a'
+	}
+	h, p, trunc = truncateForDump(big)
+	if !trunc {
+		t.Error("big value should be truncated")
+	}
+	if len(h) != 2*maxValueDumpBytes {
+		t.Errorf("big hex len = %d, want %d", len(h), 2*maxValueDumpBytes)
+	}
+	if len(p) != maxValuePrintBytes {
+		t.Errorf("big print len = %d, want %d", len(p), maxValuePrintBytes)
+	}
+}
