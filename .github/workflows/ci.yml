@@ -1,0 +1,87 @@
+# SQLiteX CI
+#
+# 职责边界：项目本身作为 Go 源码包被业务项目 import 使用，不做库打包；
+# CI 仅负责——质量门禁（vet/test/dist 一致性校验）+ 打包两个独立工具：
+#   1. sqlitex-admin        轻量 Web 管控面板
+#   2. protoc-gen-sqlitex   protoc 代码生成插件
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify module integrity
+        run: go mod verify
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test -race ./...
+
+      # dist 一致性：web/dist 随仓库提交供 go:embed 使用，
+      # 此处校验「源码 → 构建 → 产物」可复现，防止 dist 与 src 不一致
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Rebuild frontend and diff dist
+        working-directory: cmd/sqlitex-admin/web
+        run: |
+          npm ci
+          npm run build
+          cd - >/dev/null
+          git diff --exit-code cmd/sqlitex-admin/web/dist || {
+            echo "::error::web/dist 与 src 不一致，请本地 npm run build 后提交"
+            exit 1
+          }
+
+  package:
+    name: Package tools (${{ matrix.goos }}-${{ matrix.goarch }})
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build tools
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o dist/sqlitex-admin-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/sqlitex-admin
+          go build -trimpath -ldflags "-s -w" -o dist/protoc-gen-sqlitex-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/protoc-gen-sqlitex
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqlitex-tools-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          retention-days: 14
