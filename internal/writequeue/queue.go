@@ -93,14 +93,14 @@ type BatchPutter interface {
 // Queue 是 MPSC 写队列的核心结构。
 // 多生产者通过 Submit 提交操作，单后台 Goroutine 消费。
 type Queue struct {
-	queue     chan *WriteOp
-	putter    Putter
-	batchSize    int    // 组提交批量大小，0=逐条消费
-	maxMem       uint64 // 内存软上限（字节），0=不启用
-	memExceeded  atomic.Bool
-	stopped      atomic.Bool
-	wg           sync.WaitGroup
-	memStop      chan struct{} // 通知 memMonitorLoop 立即退出
+	queue       chan *WriteOp
+	putter      Putter
+	batchSize   int    // 组提交批量大小，0=逐条消费
+	maxMem      uint64 // 内存软上限（字节），0=不启用
+	memExceeded atomic.Bool
+	stopped     atomic.Bool
+	wg          sync.WaitGroup
+	memStop     chan struct{} // 通知 memMonitorLoop 立即退出
 }
 
 // Config 定义队列参数。
@@ -178,6 +178,12 @@ func (q *Queue) Submit(op *WriteOp) error {
 	default:
 		return ErrFull
 	}
+}
+
+// Len 返回当前队列中待消费的操作数（缓冲 channel 的瞬时长度）。
+// 仅供可观测性采集使用，不保证强一致。
+func (q *Queue) Len() int {
+	return len(q.queue)
 }
 
 // Stop 停止队列消费循环。

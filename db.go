@@ -16,11 +16,12 @@ import (
 // 调用方通过 Open 创建，通过 Close 释放，生命周期严格管理。
 type DB struct {
 	pebble   *pebble.DB
-	cache    *pebble.Cache       // Pebble block cache，Close 时释放
-	hotCache *tinylfu.TinyLFU    // TinyLFU 热点读缓存
+	cache    *pebble.Cache    // Pebble block cache，Close 时释放
+	hotCache *tinylfu.TinyLFU // TinyLFU 热点读缓存
 	queue    *writequeue.Queue
 	cfg      Config
 	closed   atomic.Bool
+	metrics  *metrics // Config.Metrics=true 时非 nil
 }
 
 // Open 打开或创建指定目录下的 SQLiteX 数据库。
@@ -90,13 +91,17 @@ func Open(cfg Config) (*DB, error) {
 		})
 	}
 
-	return &DB{
+	db := &DB{
 		pebble:   pdb,
 		cache:    cache,
 		hotCache: hotCache,
 		queue:    q,
 		cfg:      cfg,
-	}, nil
+	}
+	if cfg.Metrics {
+		db.metrics = newMetrics(db, cfg.MetricsNamespace)
+	}
+	return db, nil
 }
 
 // Close 关闭数据库，释放底层资源。
@@ -123,12 +128,18 @@ func (db *DB) CacheStats() (hits, misses, evictions, entries, curBytes, expirati
 	}
 	return db.hotCache.Stats()
 }
+
 // 底层通过 MPSC 队列执行，调用方阻塞等待写入完成。
 // 写入后自动失效 TinyLFU 中对应 key 的缓存。
 func (db *DB) Put(key, value []byte) error {
+	start := time.Now()
 	err := db.submit(key, value, writequeue.OpPut)
 	if err == nil && db.hotCache != nil {
 		db.hotCache.Delete(string(key))
+	}
+	db.metrics.observe("put", resultOf(err), start)
+	if errors.Is(err, ErrWriteThrottled) {
+		db.metrics.observeThrottled()
 	}
 	return err
 }
@@ -140,6 +151,14 @@ func (db *DB) Put(key, value []byte) error {
 // Phase 3 兼容性：当 Pebble 返回 NotFound（含 TTL 惰性过期）时，
 // 同步逐出 TinyLFU 中的残留缓存，防止双读不一致。
 func (db *DB) Get(key []byte) ([]byte, error) {
+	start := time.Now()
+	val, err := db.get(key)
+	db.metrics.observe("get", resultOf(err), start)
+	return val, err
+}
+
+// get 是 Get 的实际实现，由 Get 包装埋点后调用。
+func (db *DB) get(key []byte) ([]byte, error) {
 	if db.closed.Load() {
 		return nil, ErrDBClosed
 	}
@@ -151,8 +170,10 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	if db.hotCache != nil {
 		keyStr := string(key)
 		if val, ok := db.hotCache.Get(keyStr); ok {
+			db.metrics.observeCache(true)
 			return val, nil
 		}
+		db.metrics.observeCache(false)
 	}
 
 	val, closer, err := db.pebble.Get(key)
@@ -187,9 +208,14 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 // Key 不存在时不返回错误（幂等语义）。
 // 删除后自动失效 TinyLFU 中对应 key 的缓存。
 func (db *DB) Delete(key []byte) error {
+	start := time.Now()
 	err := db.submit(key, nil, writequeue.OpDelete)
 	if err == nil && db.hotCache != nil {
 		db.hotCache.Delete(string(key))
+	}
+	db.metrics.observe("delete", resultOf(err), start)
+	if errors.Is(err, ErrWriteThrottled) {
+		db.metrics.observeThrottled()
 	}
 	return err
 }
@@ -198,6 +224,7 @@ func (db *DB) Delete(key []byte) error {
 // 始终使用 pebble.Sync，不受 AsyncWAL 配置影响。
 // 写入后自动失效 TinyLFU 中对应 key 的缓存。
 func (db *DB) PutSync(key, value []byte) error {
+	start := time.Now()
 	if db.closed.Load() {
 		return ErrDBClosed
 	}
@@ -208,6 +235,7 @@ func (db *DB) PutSync(key, value []byte) error {
 	if err == nil && db.hotCache != nil {
 		db.hotCache.Delete(string(key))
 	}
+	db.metrics.observe("put_sync", resultOf(err), start)
 	return err
 }
 
@@ -222,6 +250,17 @@ type KVPair struct {
 // 通过 Pebble Batch 保证原子性，适用于需要并发安全的多 Key 写入场景（如主数据+索引）。
 // AsyncWAL 配置决定使用 Sync 还是 NoSync 提交。
 func (db *DB) WriteBatch(ops []KVPair) error {
+	start := time.Now()
+	err := db.writeBatch(ops)
+	db.metrics.observe("batch", resultOf(err), start)
+	if db.metrics != nil {
+		db.metrics.batchSize.Observe(float64(len(ops)))
+	}
+	return err
+}
+
+// writeBatch 是 WriteBatch 的实际实现，由 WriteBatch 包装埋点后调用。
+func (db *DB) writeBatch(ops []KVPair) error {
 	if db.closed.Load() {
 		return ErrDBClosed
 	}

@@ -59,6 +59,15 @@ type Config struct {
 	// 设为 -1 禁用缓存。
 	// 推荐值：10-50MB，视热点数据量而定。
 	CacheMaxMB int
+
+	// Metrics 启用内建 Prometheus 指标（QPS、延迟直方图、缓存命中率、
+	// 队列深度、磁盘/内存占用等）。默认 false（零开销）。
+	// 启用后通过 DB.MetricsHandler() 获取 /metrics 端点。
+	Metrics bool
+
+	// MetricsNamespace 指标名前缀，默认 "sqlitex"。
+	// 多实例场景可按业务命名（如 "sqlitex_order"）。
+	MetricsNamespace string
 }
 
 // applyDefaults 将零值填充为 ProfileEdge 预设。
@@ -71,5 +80,8 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MaxQueueLen <= 0 {
 		c.MaxQueueLen = 1024
+	}
+	if c.MetricsNamespace == "" {
+		c.MetricsNamespace = "sqlitex"
 	}
 }
