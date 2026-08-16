@@ -18,11 +18,13 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cockroachdb/pebble"
@@ -30,13 +32,17 @@ import (
 
 func main() {
 	dir := flag.String("dir", "", "SQLiteX (Pebble) 数据目录，必填")
-	addr := flag.String("addr", "127.0.0.1:8080", "HTTP 监听地址")
+	addr := flag.String("addr", "127.0.0.1:8080", "HTTP 监听地址（工具仅供本机调试，勿绑定到非回环地址）")
 	protoPath := flag.String("proto", "", "可选：.proto Schema 文件路径，用于面板展示")
+	maxBody := flag.Int64("maxbody", defaultMaxBodyBytes, "HTTP 请求体上限（字节），超大 proto 分片导入时可调大")
 	flag.Parse()
 
 	if *dir == "" {
 		flag.Usage()
 		os.Exit(2)
+	}
+	if err := warnIfExposed(*addr); err != nil {
+		log.Printf("解析监听地址失败，按可能暴露处理: %v", err)
 	}
 
 	db, err := pebble.Open(*dir, &pebble.Options{ReadOnly: true})
@@ -50,6 +56,7 @@ func main() {
 		dir:       *dir,
 		protoPath: *protoPath,
 		schema:    newSchemaStore(),
+		maxBody:   *maxBody,
 	}
 
 	// 启动时自动导入 -proto 指定的 Schema（仅解析展示，失败不阻断启动）
@@ -76,10 +83,50 @@ func main() {
 	mux.HandleFunc("/api/schema", srv.handleSchemaAPI)
 	mux.HandleFunc("/schema", srv.handleSchemaText)
 
-	log.Printf("sqlitex-admin listening on http://%s (dir=%s)", *addr, *dir)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	// 请求体上限：防超大 multipart 溢写临时文件耗尽磁盘；
+	// -maxbody 为预留的大分片导入接口（Schema 上传的 LimitReader 同步跟随）
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody)
+		mux.ServeHTTP(w, r)
+	})
+
+	log.Printf("sqlitex-admin listening on http://%s (dir=%s, maxbody=%d)", *addr, *dir, srv.maxBody)
+	server := &http.Server{
+		Addr:              *addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second, // slowloris 防护
+	}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// defaultMaxBodyBytes 默认请求体上限：8MB（Schema 上传远超所需）。
+const defaultMaxBodyBytes = 8 << 20
+
+// warnIfExposed 监听地址绑定到非回环接口时打印显著警告。
+// 本工具无认证且可读全库数据，仅设计为本机调试使用。
+func warnIfExposed(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	target := host
+	if target == "" {
+		target = "0.0.0.0 (全部网卡)"
+	}
+	log.Printf("========================================================================")
+	log.Printf("⚠ 安全警告: 监听地址 %s 绑定到非回环接口", target)
+	log.Printf("⚠ 本工具无认证、可读取整个数据库内容，仅供本机调试使用！")
+	log.Printf("⚠ 如需远程访问请自行加反向代理认证，风险自担")
+	log.Printf("========================================================================")
+	return nil
 }
 
 // adminServer 持有只读 Pebble 句柄与面板配置。
@@ -88,6 +135,7 @@ type adminServer struct {
 	dir       string
 	protoPath string
 	schema    *schemaStore
+	maxBody   int64 // 请求体上限（-maxbody），Schema 上传分片同步跟随
 }
 
 // keyEntry 是 /api/keys 返回的单条记录摘要。
@@ -267,11 +315,18 @@ func (s *adminServer) handleSchemaAPI(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		file, header, err := r.FormFile("file")
 		if err != nil {
+			// MaxBytesReader 触发的超限单独映射为 413，提示用 -maxbody 调大
+			if strings.Contains(err.Error(), "request body too large") {
+				httpError(w, http.StatusRequestEntityTooLarge,
+					fmt.Errorf("request body exceeds -maxbody=%d, restart with a larger -maxbody for big imports", s.maxBody))
+				return
+			}
 			httpError(w, http.StatusBadRequest, fmt.Errorf("multipart field 'file' required: %v", err))
 			return
 		}
 		defer file.Close()
-		data, err := io.ReadAll(io.LimitReader(file, 4<<20)) // 4MB 上限
+		// 文件内容上限与请求体上限（-maxbody）同步，保留大分片导入通道
+		data, err := io.ReadAll(io.LimitReader(file, s.maxBody))
 		if err != nil {
 			httpError(w, http.StatusBadRequest, err)
 			return

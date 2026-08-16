@@ -39,6 +39,9 @@ go func() {
 
 `sqlitex-admin` 以**只读**模式加载数据目录，提供可视化调试：
 
+> ⚠️ **安全警示：本工具仅供本机调试使用，请勿暴露到网络。**
+> 工具**没有任何认证**，且可读取整个数据库的全部数据与 Schema 结构。默认绑定 `127.0.0.1` 已做防护；若用 `-addr` 绑定到非回环地址（如 `0.0.0.0`），启动时会打印显著告警，由此产生的数据泄露风险由操作者自担。确需远程使用，请前置带认证的反向代理（如 nginx basic auth + TLS）。
+
 ```bash
 go build -o sqlitex-admin ./cmd/sqlitex-admin
 
@@ -46,7 +49,10 @@ go build -o sqlitex-admin ./cmd/sqlitex-admin
 ./sqlitex-admin -dir ./data
 
 # 指定端口 + 关联 Schema
-./sqlitex-admin -dir ./data -addr :8080 -proto ./example/demo.proto
+./sqlitex-admin -dir ./data -addr 127.0.0.1:8080 -proto ./example/demo.proto
+
+# 超大 proto 分片导入：调大请求体上限（默认 8MB）
+./sqlitex-admin -dir ./data -maxbody 67108864
 ```
 
 功能：
