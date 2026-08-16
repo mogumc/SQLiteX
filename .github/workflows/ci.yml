@@ -45,8 +45,8 @@ jobs:
         run: |
           npm ci
           npm run build
-          cd - >/dev/null
-          git diff --exit-code cmd/sqlitex-admin/web/dist || {
+          # 不用 cd -：working-directory 启动的 shell 无 OLDPWD，且 bash -e 下会中止
+          git -C "$GITHUB_WORKSPACE" diff --exit-code cmd/sqlitex-admin/web/dist || {
             echo "::error::web/dist 与 src 不一致，请本地 npm run build 后提交"
             exit 1
           }
