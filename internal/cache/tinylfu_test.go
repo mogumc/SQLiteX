@@ -230,3 +230,44 @@ func TestMaxItemBytes(t *testing.T) {
 		t.Fatal("oversized item should not be cached")
 	}
 }
+
+// TestConcurrentRecordStress 复现 CI 暴露的数据竞争形态：
+// DB.Get 未命中路径会并发调用 Record（CMS 递增），
+// 多 goroutine 在重叠 key 上高频 Record + Get + Set + Delete。
+// 修复前 countMinSketch.increment 的非原子 rows[i][idx]++ 会触发 -race。
+func TestConcurrentRecordStress(t *testing.T) {
+	c := New(Config{
+		MaxBytes:           1 << 20,
+		MaxItemBytes:       4096,
+		AdmissionThreshold: 2,
+		DefaultTTL:         time.Second,
+	})
+	defer c.Close()
+
+	const goroutines = 16
+	const perG = 5000
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < perG; i++ {
+				// 重叠 key 域制造 CMS 同格竞争（宽度 2048，1000 个 key 必然碰撞）
+				key := fmt.Sprintf("hot-%d", (i*31+g*7)%1000)
+				if _, ok := c.Get(key); !ok {
+					if c.Record(key) {
+						c.Set(key, []byte("payload"))
+					}
+				}
+				if i%50 == 0 {
+					c.Delete(fmt.Sprintf("hot-%d", i%1000))
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	if _, _, _, entries, _, _ := c.Stats(); entries == 0 {
+		t.Log("no entries admitted (threshold not reached in this run)")
+	}
+}

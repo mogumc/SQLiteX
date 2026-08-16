@@ -250,11 +250,18 @@ func (c *TinyLFU) evictLocked() {
 
 // countMinSketch 用 4 个哈希函数 + 计数器数组估算频率。
 // 内存占用：4 × width × 4 bytes (uint32)
+//
+// 并发安全：Increment/Estimate 可被多 goroutine 无锁并发调用，
+// 单元格计数与退化均通过原子 CAS 完成（CMS 是估算器，偶发 CAS
+// 重试不影响正确性；饱和上限防回绕）。
 type countMinSketch struct {
 	rows    [4][]uint32
 	width   int
-	counter uint64 // 累计增量计数，用于触发全局退化
+	counter atomic.Uint64 // 累计增量计数，用于触发全局退化
 }
+
+// counterSaturation 单格计数饱和阈值（uint32 最大值）。
+const counterSaturation = ^uint32(0)
 
 func newCountMinSketch() *countMinSketch {
 	width := 2048
@@ -271,30 +278,44 @@ func (c *countMinSketch) Increment(key string) uint32 {
 	return c.increment(h1, h2)
 }
 
+// increment 原子递增 4 个哈希位并返回最小值。
+// CAS 循环实现饱和递增：达到 counterSaturation 后不再增长，杜绝回绕。
 func (c *countMinSketch) increment(h1, h2 uint64) uint32 {
-	min := uint32(^uint32(0))
+	min := counterSaturation
 	for i := range c.rows {
 		idx := c.index(i, h1, h2)
-		if c.rows[i][idx] < ^uint32(0) {
-			c.rows[i][idx]++
+		cell := &c.rows[i][idx]
+		for {
+			old := atomic.LoadUint32(cell)
+			if old >= counterSaturation {
+				break
+			}
+			if atomic.CompareAndSwapUint32(cell, old, old+1) {
+				break
+			}
 		}
-		if c.rows[i][idx] < min {
-			min = c.rows[i][idx]
+		if v := atomic.LoadUint32(cell); v < min {
+			min = v
 		}
 	}
-	c.counter++
 	// 每 100万次增量全局右移 1 位，避免计数器饱和
-	if c.counter%1_000_000 == 0 {
+	if c.counter.Add(1)%1_000_000 == 0 {
 		c.decay()
 	}
 	return min
 }
 
-// decay 全局右移所有计数器 1 位。
+// decay 全局右移所有计数器 1 位（逐格 CAS，与并发 Increment 互不阻塞）。
 func (c *countMinSketch) decay() {
 	for i := range c.rows {
 		for j := range c.rows[i] {
-			c.rows[i][j] >>= 1
+			cell := &c.rows[i][j]
+			for {
+				old := atomic.LoadUint32(cell)
+				if atomic.CompareAndSwapUint32(cell, old, old>>1) {
+					break
+				}
+			}
 		}
 	}
 }
