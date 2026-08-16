@@ -196,8 +196,8 @@ func TestAdmissionThreshold(t *testing.T) {
 	})
 	defer c.Close()
 
-	c.Set("a", []byte("once"))         // 直接 Set 不受控
-	_, ok := c.Get("a")                // 能读到
+	c.Set("a", []byte("once")) // 直接 Set 不受控
+	_, ok := c.Get("a")        // 能读到
 	if !ok {
 		t.Fatal("direct Set should be readable")
 	}

@@ -33,10 +33,10 @@ type Config struct {
 //   - LRU 满载驱逐：超 MaxBytes 时按队尾淘汰
 //   - CountMinSketch 频率退化：每 100 万次全局右移，防止准入阈值失效
 type TinyLFU struct {
-	sketch   *countMinSketch
-	cache    map[string]*list.Element
-	lru      *list.List
-	mu       sync.RWMutex
+	sketch *countMinSketch
+	cache  map[string]*list.Element
+	lru    *list.List
+	mu     sync.RWMutex
 
 	maxBytes     int64
 	maxItemBytes int64
@@ -44,9 +44,9 @@ type TinyLFU struct {
 	admThreshold uint32
 	ttl          int64 // 默认 TTL (纳秒)
 
-	hits      atomic.Int64
-	misses    atomic.Int64
-	evictions atomic.Int64
+	hits        atomic.Int64
+	misses      atomic.Int64
+	evictions   atomic.Int64
 	expirations atomic.Int64
 
 	stopCh chan struct{}

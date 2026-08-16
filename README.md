@@ -3,7 +3,7 @@
 # SQLiteX
 SQLiteX 是一个基于Go的编译时数据库，针对本地/云原生应用优化，旨在解决SQLite的性能问题同时保持轻量化。
 
-> 📚 **文档**：快速上手 → [`docs/quickstart.md`](docs/quickstart.md) · Schema 指南 → [`docs/schema.md`](docs/schema.md) · API 参考 → [`docs/api.md`](docs/api.md) · TTL 生命周期 → [`docs/ttl.md`](docs/ttl.md) · 性能调优 → [`docs/performance.md`](docs/performance.md)
+> 📚 **文档**：快速上手 → [`docs/quickstart.md`](docs/quickstart.md) · Schema 指南 → [`docs/schema.md`](docs/schema.md) · API 参考 → [`docs/api.md`](docs/api.md) · TTL 生命周期 → [`docs/ttl.md`](docs/ttl.md) · 性能调优 → [`docs/performance.md`](docs/performance.md) · 可观测性 → [`docs/observability.md`](docs/observability.md) · 运维手册 → [`docs/ops.md`](docs/ops.md)
 
 ## 为什么有这个项目?
 
@@ -74,7 +74,7 @@ _核心机制： 提供云原生友好的开发体验，内建生产级监控与
 
 _核心策略： 遵循“底层复用、上层创新、小步快跑”的原则。优先打通编译时引擎（核心灵魂），随后逐步补齐高级存储特性与生产级加固，避免在底层存储引擎上陷入过度设计的泥潭。_
 
-### Phase 0: 底层对接与 MVP 验证 (Foundation & MVP)
+### Phase 0: 底层对接与 MVP 验证 (Foundation & MVP) ✅ 已完成
 _目标： 跑通 Pebble 底层封装，验证“轻量”与“高吞吐”的基准指标，建立最小可用的 KV 读写链路。_
 
 *   **Pebble 极简封装**：集成 Pebble 引擎，放弃单文件打包，直接使用其原生目录结构。配置 `ProfileEdge`（边缘模式），严格限制 BlockCache（如 8MB）和 MemTable（如 4MB），验证低内存 footprint。
@@ -83,7 +83,7 @@ _目标： 跑通 Pebble 底层封装，验证“轻量”与“高吞吐”的�
 *   **背压限流机制**：实现写队列长度硬限制与基于 `runtime.MemStats` 的全局内存水位监控，队列满或内存超限时触发背压（返回 `ErrWriteThrottled`）。
 *   **里程碑交付**：`sqlitex` 基础包发布，支持通过原生 API 进行高并发、低内存占用的基础 Put/Get/Delete 操作。
 
-### Phase 1: 编译时引擎与零反射 DX (Compile-Time Engine)
+### Phase 1: 编译时引擎与零反射 DX (Compile-Time Engine) ✅ 已完成
 _目标： 打造项目的核心灵魂——`protoc-gen-sqlitex`，实现从 Proto 定义到强类型、零反射 Go 代码的完整闭环。_
 
 *   **AST 解析与 Option 提取**：开发 protoc 插件，解析 Protobuf AST，提取 Message 结构、字段类型，以及自定义 Options（如 `compress`, `index`, `ttl`）。
@@ -92,7 +92,7 @@ _目标： 打造项目的核心灵魂——`protoc-gen-sqlitex`，实现从 Pro
 *   **Value 结构重构**：在生成代码中实现 `Meta Header`（偏移量/压缩标识）与 `Payload` 的分离逻辑，为后续局部压缩打下基础。
 *   **里程碑交付**：`protoc-gen-sqlitex` 插件发布。业务侧只需编写 `.proto` 文件，即可生成具备完整 CRUD、链式查询和 Mock 能力的强类型 Go 代码。
 
-### Phase 2: 核心存储特性与读性能护城河 (Advanced Features)
+### Phase 2: 核心存储特性与读性能护城河 (Advanced Features) ✅ 已完成
 _目标： 实现 SQLiteX 区别于普通 KV 库的高级特性，重点解决“读热点打穿”和“大字段 CPU 浪费”两大生产痛点。_
 
 *   **TinyLFU 热缓存层**：
@@ -104,7 +104,7 @@ _目标： 实现 SQLiteX 区别于普通 KV 库的高级特性，重点解决�
 *   **O(1) 游标分页**：在 Fluent API 中强制实现基于 `[TableID] + [LastKey]` 的 Seek 游标分页，彻底废弃 OFFSET。
 *   **里程碑交付**：引擎具备抗读热点打穿能力、低 CPU 损耗的大字段查询能力，以及高效的深分页性能。
 
-### Phase 3: 生产级加固、生命周期与生态 (Production Hardening)
+### Phase 3: 生产级加固、生命周期与生态 (Production Hardening) ✅ 已完成（v1.0.0 预发布就绪）
 _目标： 补齐企业级/生产环境所需的可观测性、数据生命周期管理与运维工具，达到 Production-Ready 状态。_
 
 *   **TTL 与生命周期管理**：实现读取时的惰性删除（Lazy Deletion）与 Compaction 阶段的物理清理联动。
@@ -120,7 +120,7 @@ _目标： 补齐企业级/生产环境所需的可观测性、数据生命周�
 *   **边缘数据同步 (Edge Sync)**：探索基于 WAL 变更流（Change Stream）的轻量级主从同步协议，适配云边协同场景。
 *   **多语言 SDK 扩展**：通过 FFI 或 gRPC 网关，将 SQLiteX 的能力暴露给 Rust/C++ 或前端 Node.js 环境。
 
-## _目前项目仍在开发中！_
+## _Roadmap Phase 0-3 全部交付，v1.0.0 预发布（pre-release）就绪：TTL 生命周期、Prometheus 可观测性、零停机热备份、Web Admin 面板（`cmd/sqlitex-admin`）与崩溃恢复混沌测试均已落地并附带测试。长期演进方向按需推进。_
 
 ## License
 MIT License

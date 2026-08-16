@@ -82,6 +82,25 @@ func (db *DB) CacheStats() (hits, misses, evictions, entries, curBytes, expirati
 
 返回 TinyLFU 热点读缓存的命中/未命中/淘汰/条目数/占用字节/过期数，用于可观测性。
 
+### 6. 可观测性（Metrics）
+
+```go
+func (db *DB) MetricsHandler() http.Handler        // 标准 /metrics 端点，未启用返回 nil
+func (db *DB) MetricsRegistry() prometheus.Gatherer // 独立 Registry，用于聚合采集
+func (db *DB) MetricsText() (string, error)          // 文本格式直接输出（CLI/测试用）
+```
+
+需要 `Config.Metrics=true` 启用。详见 [observability.md](observability.md)。
+
+### 7. 零停机热备份
+
+```go
+func (db *DB) Checkpoint(destDir string) error // 非阻塞物理快照，destDir 须为空
+func (db *DB) BackupTo(destDir string) error   // Checkpoint + 目录 fsync 的运维封装
+```
+
+快照目录可直接用 `sqlitex.Open` 打开恢复。详见 [ops.md](ops.md)。
+
 ---
 
 ## 二、Config 全参
@@ -99,6 +118,8 @@ func (db *DB) CacheStats() (hits, misses, evictions, entries, curBytes, expirati
 | `WALMinSyncInterval` | time.Duration | 0     | 异步 WAL 两次 sync 最小间隔，合并写减少 IOPS          |
 | `BatchCommitSize`    | int           | 0     | 组提交批量大小，0=逐条（NoSync 下批量反而更差）       |
 | `CacheMaxMB`         | int           | 10    | TinyLFU 热点读缓存上限，-1 禁用                       |
+| `Metrics`            | bool          | false | 启用内建 Prometheus 指标（默认零开销）                |
+| `MetricsNamespace`   | string        | sqlitex | 指标名前缀，多实例区分                               |
 
 ---
 
