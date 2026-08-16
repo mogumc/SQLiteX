@@ -21,8 +21,9 @@ type Config struct {
 	MaxQueueLen int
 
 	// MaxMemMB 全局内存软上限，单位 MB。
-	// 基于 runtime.MemStats.Alloc 采样，超限时拒绝新写入。
-	// 默认 0 表示不启用内存监控。
+	// 基于 runtime.MemStats.Alloc 采样（250ms 窗口，软限），超限时拒绝新写入（背压）。
+	// 默认 0 表示不限制——MaxQueueLen 只限制在途写入的条数而非单条大小，
+	// 存储 MB 级长文本/大二进制时有 OOM 风险，建议开启（约设为进程可用内存的 70-80%）。
 	MaxMemMB int64
 
 	// DisableWAL 完全禁用 WAL，崩溃时无法恢复数据。

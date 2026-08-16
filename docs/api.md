@@ -111,7 +111,7 @@ func (db *DB) BackupTo(destDir string) error   // Checkpoint + 目录 fsync 的�
 | `BlockCacheSize`     | int64         | 8MB   | Pebble 块缓存                                         |
 | `MemTableSize`       | int64         | 4MB   | MemTable 大小（**读性能关键**，压测建议 64MB+） |
 | `MaxQueueLen`        | int           | 1024  | 写队列最大缓冲，满则`ErrWriteThrottled`             |
-| `MaxMemMB`           | int64         | 0     | 全局内存软上限（MB），超限拒绝写入，0=禁用            |
+| `MaxMemMB`           | int64         | 0     | 全局内存软上限（MB），超限拒绝写入，**0=不限制**；存长文本/大 value 建议开启（≈进程可用内存 70-80%） |
 | `DisableWAL`         | bool          | false | 完全禁用 WAL（可丢数据场景）                          |
 | `AsyncWAL`           | bool          | false | 异步 WAL（NoSync），崩溃可能丢最近数据                |
 | `WALBytesPerSync`    | int           | 0     | 异步 WAL 后台 sync 字节间隔，推荐 1MB                 |
