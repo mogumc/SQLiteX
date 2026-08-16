@@ -185,3 +185,38 @@ func TestTruncateForDump(t *testing.T) {
 		t.Errorf("big print len = %d, want %d", len(p), maxValuePrintBytes)
 	}
 }
+
+// TestComparePKInt64Order 验证主键数值序比较：
+// 小端编码下字节序≠数值序（256 的字节序先于 1），排序视图依赖本函数纠偏。
+func TestComparePKInt64Order(t *testing.T) {
+	ts := &tableSchema{PrimaryKey: pkSchema{Type: "int64"}}
+	mk := func(id int64) []byte {
+		k := append([]byte{1}, make([]byte, 8)...) // [TableID=1][PK]
+		binary.LittleEndian.PutUint64(k[1:], uint64(id))
+		return k
+	}
+
+	// 数值递增序列；其字节序本身是乱序的（256 < 1 字节序）
+	ordered := []int64{-100, -1, 0, 1, 2, 3, 100, 255, 256, 257, 65535, 65536}
+	for i := 0; i+1 < len(ordered); i++ {
+		a, b := mk(ordered[i]), mk(ordered[i+1])
+		if got := comparePK(ts, a, b); got >= 0 {
+			t.Errorf("comparePK(%d, %d) = %d, want <0", ordered[i], ordered[i+1], got)
+		}
+		if got := comparePK(ts, b, a); got <= 0 {
+			t.Errorf("comparePK(%d, %d) = %d, want >0", ordered[i+1], ordered[i], got)
+		}
+	}
+	if got := comparePK(ts, mk(5), mk(5)); got != 0 {
+		t.Errorf("comparePK(5,5) = %d, want 0", got)
+	}
+}
+
+// TestComparePKStringOrder 字符串主键退化为字典序。
+func TestComparePKStringOrder(t *testing.T) {
+	ts := &tableSchema{PrimaryKey: pkSchema{Type: "string"}}
+	mk := func(pk string) []byte { return append([]byte{2}, []byte(pk)...) }
+	if comparePK(ts, mk("abc"), mk("abd")) >= 0 {
+		t.Error("string PK should compare lexicographically")
+	}
+}

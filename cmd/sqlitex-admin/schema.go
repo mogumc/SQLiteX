@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -301,6 +302,61 @@ func pkByteLen(ts *tableSchema) int {
 		return 8
 	case "int32", "uint32":
 		return 4
+	}
+	return 0
+}
+
+// comparePK 比较两个同表数据 Key 的主键顺序（数值感知）。
+// 物理 Key 中 int 主键为小端编码，字节序不等于数值序（如 pk=256 字节序先于 pk=1），
+// 表格视图需要按数值序排列时使用本函数；string/bytes 主键退化为字典序。
+func comparePK(ts *tableSchema, a, b []byte) int {
+	pa, pb := pkBytesOf(ts, a), pkBytesOf(ts, b)
+	switch ts.PrimaryKey.Type {
+	case "int64", "sint64":
+		if len(pa) == 8 && len(pb) == 8 {
+			return cmpInt64(int64(binary.LittleEndian.Uint64(pa)), int64(binary.LittleEndian.Uint64(pb)))
+		}
+	case "uint64":
+		if len(pa) == 8 && len(pb) == 8 {
+			return cmpUint64(binary.LittleEndian.Uint64(pa), binary.LittleEndian.Uint64(pb))
+		}
+	case "int32", "sint32":
+		if len(pa) == 4 && len(pb) == 4 {
+			return cmpInt64(int64(int32(binary.LittleEndian.Uint32(pa))), int64(int32(binary.LittleEndian.Uint32(pb))))
+		}
+	case "uint32":
+		if len(pa) == 4 && len(pb) == 4 {
+			return cmpInt64(int64(binary.LittleEndian.Uint32(pa)), int64(binary.LittleEndian.Uint32(pb)))
+		}
+	}
+	return bytes.Compare(pa, pb)
+}
+
+// pkBytesOf 从数据 Key 中剥离 [TableID Uvarint] 前缀，返回 PK bytes。
+func pkBytesOf(ts *tableSchema, raw []byte) []byte {
+	_, n := binary.Uvarint(raw)
+	if n <= 0 || n >= len(raw) {
+		return nil
+	}
+	return raw[n:]
+}
+
+func cmpInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+func cmpUint64(a, b uint64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
 	}
 	return 0
 }

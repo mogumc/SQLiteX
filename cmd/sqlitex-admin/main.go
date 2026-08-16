@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -160,8 +161,10 @@ type rowView struct {
 
 // keysResponse 是 /api/keys 的分页响应。
 type keysResponse struct {
-	Entries    []keyEntry `json:"entries"`
-	NextCursor string     `json:"next_cursor,omitempty"` // 空表示没有更多数据
+	Entries       []keyEntry `json:"entries"`
+	NextCursor    string     `json:"next_cursor,omitempty"`    // 空表示没有更多数据
+	Total         int        `json:"total,omitempty"`          // 排序模式：全表行数
+	ScanTruncated bool       `json:"scan_truncated,omitempty"` // 排序模式：超过扫描护栏被截断
 }
 
 // statsResponse 是 /api/stats 的存储概览。
@@ -221,15 +224,92 @@ func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 
 	// 表级过滤：物理前缀 [TableID Uvarint]（uvarint 编码首字节天然无歧义，
 	// 0xFF 索引空间不会落入任何表前缀，与生成代码 EncodeKey(tableID, nil) 一致）
+	tableID := uint64(0)
 	if v := r.URL.Query().Get("table_id"); v != "" {
-		tableID, ok := parseUint64(v)
+		id, ok := parseUint64(v)
 		if !ok {
 			httpError(w, http.StatusBadRequest, fmt.Errorf("invalid table_id"))
 			return
 		}
+		tableID = id
 		prefix = string(dataKeyPrefix(tableID))
 	}
 
+	// 表视图默认按主键排序：物理 Key 中 int 主键是小端编码，
+	// 字节序 ≠ 数值序（pk=256 会排在 pk=1 前），直接翻页展示为乱序。
+	// sort=physical 可回退物理序查看。
+	if tableID > 0 && r.URL.Query().Get("sort") != "physical" {
+		if ts := s.schema.table(tableID); ts != nil {
+			s.handleTableKeysSorted(w, r, ts, limit, decode)
+			return
+		}
+	}
+
+	s.handleKeysPhysical(w, r, prefix, limit, decode)
+}
+
+// maxTableScan 排序模式下单表最大扫描行数（调试工具的内存护栏）。
+const maxTableScan = 10000
+
+// handleTableKeysSorted 主键有序的表视图：
+// key-only 全表扫描（≤maxTableScan）→ 按主键类型排序 → 内存分页 →
+// 仅对当前页做点查取值与字段解码，避免全表 value 常驻内存。
+// 游标语义：排序模式下 cursor 为页偏移（十进制字符串）。
+func (s *adminServer) handleTableKeysSorted(w http.ResponseWriter, r *http.Request, ts *tableSchema, limit int, decode bool) {
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: dataKeyPrefix(ts.TableID)})
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer iter.Close()
+
+	var keys [][]byte
+	prefix := dataKeyPrefix(ts.TableID)
+	for iter.SeekGE(prefix); iter.Valid(); iter.Next() {
+		k := iter.Key()
+		if !strings.HasPrefix(string(k), string(prefix)) {
+			break
+		}
+		if len(keys) == maxTableScan {
+			break // 截断护栏，响应中标记
+		}
+		keys = append(keys, append([]byte(nil), k...)) // 拷贝：iter.Key 生命周期仅当次迭代
+	}
+	sort.Slice(keys, func(i, j int) bool { return comparePK(ts, keys[i], keys[j]) < 0 })
+
+	offset := 0
+	if cur := r.URL.Query().Get("cursor"); cur != "" {
+		v, err := strconv.Atoi(cur)
+		if err != nil || v < 0 {
+			httpError(w, http.StatusBadRequest, fmt.Errorf("invalid cursor (sorted mode expects offset)"))
+			return
+		}
+		offset = v
+	}
+
+	resp := keysResponse{Total: len(keys), ScanTruncated: len(keys) == maxTableScan}
+	if offset < len(keys) {
+		end := offset + limit
+		if end > len(keys) {
+			end = len(keys)
+		}
+		for _, k := range keys[offset:end] {
+			val, closer, err := s.db.Get(k)
+			if err != nil {
+				continue // 单行读取失败跳过，不阻断整页
+			}
+			resp.Entries = append(resp.Entries, s.buildEntry(k, val, decode))
+			closer.Close()
+		}
+		if end < len(keys) {
+			resp.NextCursor = strconv.Itoa(end)
+		}
+	}
+	writeJSON(w, resp)
+}
+
+// handleKeysPhysical 物理序扫描（全库模式 / sort=physical 回退）。
+func (s *adminServer) handleKeysPhysical(w http.ResponseWriter, r *http.Request, prefix string, limit int, decode bool) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte(prefix)})
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
@@ -261,31 +341,36 @@ func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 			resp.NextCursor = lastKeyOf(resp.Entries)
 			break
 		}
-		v := iter.Value()
-		pv := v
-		if len(pv) > 64 {
-			pv = pv[:64]
-		}
-		entry := keyEntry{
-			Key:     printable(k),
-			KeyB64:  base64.RawURLEncoding.EncodeToString(k),
-			Size:    len(v),
-			Preview: printable(pv),
-		}
-		if d := s.schema.decodeKey(k); d.Kind != "unknown" {
-			entry.Decoded = &d
-			// decode=1：数据行附带字段级解码（标准表格视图）。
-			// decodeValue 在本次迭代内完成全部字符串化，iter.Value 生命周期安全。
-			if decode && d.Kind == "data" {
-				if ts := s.schema.tableOf(k); ts != nil {
-					dv := s.schema.decodeValue(ts, v)
-					entry.Row = &rowView{Fields: dv.Fields, ExpiresAt: dv.ExpiresAt, Expired: dv.Expired}
-				}
-			}
-		}
-		resp.Entries = append(resp.Entries, entry)
+		resp.Entries = append(resp.Entries, s.buildEntry(k, iter.Value(), decode))
 	}
 	writeJSON(w, resp)
+}
+
+// buildEntry 从原始 key/value 构造列表条目（含可选的字段级解码）。
+// decodeValue 在本次调用内完成全部字符串化，调用方无需关心迭代器生命周期。
+func (s *adminServer) buildEntry(k, v []byte, decode bool) keyEntry {
+	pv := v
+	if len(pv) > 64 {
+		pv = pv[:64]
+	}
+	entry := keyEntry{
+		Key:     printable(k),
+		KeyB64:  base64.RawURLEncoding.EncodeToString(k),
+		Size:    len(v),
+		Preview: printable(pv),
+	}
+	d := s.schema.decodeKey(k)
+	if d.Kind == "unknown" {
+		return entry
+	}
+	entry.Decoded = &d
+	if decode && d.Kind == "data" {
+		if ts := s.schema.tableOf(k); ts != nil {
+			dv := s.schema.decodeValue(ts, v)
+			entry.Row = &rowView{Fields: dv.Fields, ExpiresAt: dv.ExpiresAt, Expired: dv.Expired}
+		}
+	}
+	return entry
 }
 
 // handleKey 返回单条记录的完整视图：原始十六进制转储 + schema 语义化解码。
