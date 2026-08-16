@@ -671,6 +671,22 @@ func NewMockUserStore() *mockUserStore {
 	}
 }
 
+// cloneUser 逐字段拷贝记录，bytes/slice 深拷贝保证数据隔离。
+// 不整体复制 struct：protoimpl.MessageState 含锁，整体赋值会触发 vet copies lock。
+func cloneUser(src *User) *User {
+	if src == nil {
+		return nil
+	}
+	dst := &User{}
+	dst.Id = src.Id
+	dst.Name = src.Name
+	dst.Email = src.Email
+	dst.CreatedAt = src.CreatedAt
+	dst.Active = src.Active
+	dst.Bio = src.Bio
+	return dst
+}
+
 // Create 创建记录。
 func (m *mockUserStore) Create(record *User) error {
 	if record == nil {
@@ -682,8 +698,7 @@ func (m *mockUserStore) Create(record *User) error {
 		return fmt.Errorf("sqlitex: User with Id=%v already exists", record.Id)
 	}
 	// 深拷贝避免外部修改
-	clone := *record
-	m.data[record.Id] = &clone
+	m.data[record.Id] = cloneUser(record)
 	return nil
 }
 
@@ -697,8 +712,7 @@ func (m *mockUserStore) Update(record *User) error {
 	if _, exists := m.data[record.Id]; !exists {
 		return fmt.Errorf("sqlitex: User with Id=%v not found", record.Id)
 	}
-	clone := *record
-	m.data[record.Id] = &clone
+	m.data[record.Id] = cloneUser(record)
 	return nil
 }
 
@@ -718,8 +732,7 @@ func (m *mockUserStore) Get(Id int64) (*User, error) {
 	if !exists {
 		return nil, nil
 	}
-	clone := *record
-	return &clone, nil
+	return cloneUser(record), nil
 }
 
 // Serialize 将 Session 序列化为字节切片（无 TTL，永不过期）。
@@ -1269,6 +1282,20 @@ func NewMockSessionStore() *mockSessionStore {
 	}
 }
 
+// cloneSession 逐字段拷贝记录，bytes/slice 深拷贝保证数据隔离。
+// 不整体复制 struct：protoimpl.MessageState 含锁，整体赋值会触发 vet copies lock。
+func cloneSession(src *Session) *Session {
+	if src == nil {
+		return nil
+	}
+	dst := &Session{}
+	dst.Id = src.Id
+	dst.Token = src.Token
+	dst.UserId = src.UserId
+	dst.Active = src.Active
+	return dst
+}
+
 // Create 创建记录。
 func (m *mockSessionStore) Create(record *Session) error {
 	if record == nil {
@@ -1280,8 +1307,7 @@ func (m *mockSessionStore) Create(record *Session) error {
 		return fmt.Errorf("sqlitex: Session with Id=%v already exists", record.Id)
 	}
 	// 深拷贝避免外部修改
-	clone := *record
-	m.data[record.Id] = &clone
+	m.data[record.Id] = cloneSession(record)
 	return nil
 }
 
@@ -1295,8 +1321,7 @@ func (m *mockSessionStore) Update(record *Session) error {
 	if _, exists := m.data[record.Id]; !exists {
 		return fmt.Errorf("sqlitex: Session with Id=%v not found", record.Id)
 	}
-	clone := *record
-	m.data[record.Id] = &clone
+	m.data[record.Id] = cloneSession(record)
 	return nil
 }
 
@@ -1316,8 +1341,7 @@ func (m *mockSessionStore) Get(Id int64) (*Session, error) {
 	if !exists {
 		return nil, nil
 	}
-	clone := *record
-	return &clone, nil
+	return cloneSession(record), nil
 }
 
 // PurgeExpired 内存 Mock 不模拟 TTL 语义，恒返回 0。

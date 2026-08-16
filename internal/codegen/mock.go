@@ -4,10 +4,26 @@ import (
 	"bytes"
 	"fmt"
 	"text/template"
+
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 // GenerateMock 生成内存 Mock 实现，用于单元测试替换真实 Store。
 func GenerateMock(table *TableIR) string {
+	fields := make([]mockField, 0, len(table.Fields))
+	for _, f := range table.Fields {
+		goName := toGoName(f.Name)
+		mf := mockField{GoName: goName}
+		// bytes 与 repeated 字段必须深拷贝，标量/string 直接赋值。
+		// 不整体复制 struct：protoimpl.MessageState 含锁，vet 报 copies lock。
+		if f.IsRepeated || f.ProtoType == descriptorpb.FieldDescriptorProto_TYPE_BYTES {
+			mf.CopyLine = fmt.Sprintf("dst.%s = append((%s)(nil), src.%s...)", goName, f.GoType, goName)
+		} else {
+			mf.CopyLine = fmt.Sprintf("dst.%s = src.%s", goName, goName)
+		}
+		fields = append(fields, mf)
+	}
+
 	data := mockData{
 		PackageName: table.GoPackage,
 		EntityName:  table.MessageName,
@@ -16,6 +32,7 @@ func GenerateMock(table *TableIR) string {
 		PKGoType:    table.PrimaryKey.GoType,
 		TableID:     table.TableID,
 		HasTTL:      table.HasTTL,
+		Fields:      fields,
 	}
 
 	var buf bytes.Buffer
@@ -34,6 +51,13 @@ type mockData struct {
 	PKGoType    string
 	TableID     uint64
 	HasTTL      bool
+	Fields      []mockField
+}
+
+// mockField 是克隆函数中单个字段的赋值语句载体。
+type mockField struct {
+	GoName   string
+	CopyLine string
 }
 
 var mockTemplate = `package {{.PackageName}}
@@ -56,6 +80,19 @@ func NewMock{{.EntityName}}Store() *mock{{.EntityName}}Store {
 	}
 }
 
+// clone{{.EntityName}} 逐字段拷贝记录，bytes/slice 深拷贝保证数据隔离。
+// 不整体复制 struct：protoimpl.MessageState 含锁，整体赋值会触发 vet copies lock。
+func clone{{.EntityName}}(src *{{.EntityName}}) *{{.EntityName}} {
+	if src == nil {
+		return nil
+	}
+	dst := &{{.EntityName}}{}
+	{{- range .Fields}}
+	{{.CopyLine}}
+	{{- end}}
+	return dst
+}
+
 // Create 创建记录。
 func (m *mock{{.EntityName}}Store) Create(record *{{.EntityName}}) error {
 	if record == nil {
@@ -67,8 +104,7 @@ func (m *mock{{.EntityName}}Store) Create(record *{{.EntityName}}) error {
 		return fmt.Errorf("sqlitex: {{.EntityName}} with {{.PKGoName}}=%v already exists", record.{{.PKGoName}})
 	}
 	// 深拷贝避免外部修改
-	clone := *record
-	m.data[record.{{.PKGoName}}] = &clone
+	m.data[record.{{.PKGoName}}] = clone{{.EntityName}}(record)
 	return nil
 }
 
@@ -82,8 +118,7 @@ func (m *mock{{.EntityName}}Store) Update(record *{{.EntityName}}) error {
 	if _, exists := m.data[record.{{.PKGoName}}]; !exists {
 		return fmt.Errorf("sqlitex: {{.EntityName}} with {{.PKGoName}}=%v not found", record.{{.PKGoName}})
 	}
-	clone := *record
-	m.data[record.{{.PKGoName}}] = &clone
+	m.data[record.{{.PKGoName}}] = clone{{.EntityName}}(record)
 	return nil
 }
 
@@ -103,8 +138,7 @@ func (m *mock{{.EntityName}}Store) Get({{.PKGoName}} {{.PKGoType}}) (*{{.EntityN
 	if !exists {
 		return nil, nil
 	}
-	clone := *record
-	return &clone, nil
+	return clone{{.EntityName}}(record), nil
 }
 {{- if .HasTTL}}
 
