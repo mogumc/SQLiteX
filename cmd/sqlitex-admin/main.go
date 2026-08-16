@@ -270,10 +270,15 @@ func (s *adminServer) handleTableKeysSorted(w http.ResponseWriter, r *http.Reque
 		if !strings.HasPrefix(string(k), string(prefix)) {
 			break
 		}
-		if len(keys) == maxTableScan {
-			break // 截断护栏，响应中标记
+		// 多收一条用于精确判定截断：恰好 maxTableScan 行时不算截断
+		if len(keys) > maxTableScan {
+			break
 		}
 		keys = append(keys, append([]byte(nil), k...)) // 拷贝：iter.Key 生命周期仅当次迭代
+	}
+	scanTruncated := len(keys) > maxTableScan
+	if scanTruncated {
+		keys = keys[:maxTableScan]
 	}
 	sort.Slice(keys, func(i, j int) bool { return comparePK(ts, keys[i], keys[j]) < 0 })
 
@@ -287,7 +292,7 @@ func (s *adminServer) handleTableKeysSorted(w http.ResponseWriter, r *http.Reque
 		offset = v
 	}
 
-	resp := keysResponse{Total: len(keys), ScanTruncated: len(keys) == maxTableScan}
+	resp := keysResponse{Total: len(keys), ScanTruncated: scanTruncated}
 	if offset < len(keys) {
 		end := offset + limit
 		if end > len(keys) {

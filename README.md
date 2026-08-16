@@ -116,6 +116,7 @@ _目标： 补齐企业级/生产环境所需的可观测性、数据生命周�
 
 ### 📌 长期演进方向 (Future Explorations)
 
+*   **Web Admin phpMyAdmin 化**：在现有只读调试面板（Schema 导入 + 结构化解码 + 主键序表格浏览）基础上，逐步加入字段过滤、行级删改、面板内 protobuf 生成/编辑与数据导入导出，演进为类 phpMyAdmin 的管理工具（阶段规划见 [docs/ops.md](docs/ops.md)）。
 *   **跨表只读视图 (Read-Only Views)**：利用 Pebble 的 MVCC 快照，支持在同一个 Sequence ID 下对多张表进行一致性只读查询（不保证跨表写原子性）。
 *   **边缘数据同步 (Edge Sync)**：探索基于 WAL 变更流（Change Stream）的轻量级主从同步协议，适配云边协同场景。
 *   **多语言 SDK 扩展**：通过 FFI 或 gRPC 网关，将 SQLiteX 的能力暴露给 Rust/C++ 或前端 Node.js 环境。
