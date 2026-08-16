@@ -7,6 +7,7 @@ package sqlitex
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -178,6 +179,33 @@ func resultOf(err error) string {
 		return "ok"
 	}
 	return "error"
+}
+
+// opTimer 是操作级计时器：Metrics 未启用时 start/finish 均为空操作，
+// 热路径仅付出一次指针判空，不产生 time.Now / errors.Is 调用。
+type opTimer struct {
+	m     *metrics
+	op    string
+	start time.Time
+}
+
+// startOp 开始计时；db.metrics 为 nil 时返回零值计时器（零开销）。
+func (db *DB) startOp(op string) opTimer {
+	if db.metrics == nil {
+		return opTimer{}
+	}
+	return opTimer{m: db.metrics, op: op, start: time.Now()}
+}
+
+// finish 记录操作结果与耗时；背压拒绝同时计入 throttled 计数。
+func (t opTimer) finish(err error) {
+	if t.m == nil {
+		return
+	}
+	t.m.observe(t.op, resultOf(err), t.start)
+	if errors.Is(err, ErrWriteThrottled) {
+		t.m.observeThrottled()
+	}
 }
 
 // MetricsText 以 Prometheus 文本格式输出全部指标，
