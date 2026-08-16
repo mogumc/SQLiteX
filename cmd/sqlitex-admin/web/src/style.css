@@ -125,3 +125,18 @@ tr.row:hover { background: #1e2530; }
 }
 
 .hint { color: var(--dim); font-size: 12px; }
+
+/* Schema 面板 */
+#schemaPanel { margin-bottom: 20px; }
+.schema-table { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 12px; overflow-x: auto; }
+.schema-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; font-size: 14px; }
+table.fields { width: 100%; }
+table.fields td, table.fields th { font-size: 12px; padding: 4px 10px; }
+table.fields td.val { word-break: break-all; max-width: 520px; white-space: pre-wrap; }
+
+.badge { display: inline-block; background: #1e2530; border: 1px solid var(--line); border-radius: 4px; padding: 1px 8px; font-size: 11px; color: var(--dim); }
+.badge.ok { color: #7ee787; border-color: #2ea043; }
+.badge.warn { color: #f0883e; border-color: #bd561d; }
+.pk { color: #4f8cff; font-size: 11px; }
+
+select { background: var(--card); border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 8px 10px; font-family: var(--mono); }

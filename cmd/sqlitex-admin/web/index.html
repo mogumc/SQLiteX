@@ -9,21 +9,32 @@
   <header><h1>SQLiteX Admin</h1><span id="dir"></span></header>
   <main>
     <div class="cards" id="stats"></div>
+
     <div class="bar">
-      <input type="text" id="prefix" placeholder="key 前缀（TableID+PK，留空浏览全库）">
+      <input type="file" id="protoFile" accept=".proto" style="display:none">
+      <button onclick="document.getElementById('protoFile').click()">导入 Schema (.proto)</button>
+      <button class="ghost" id="clearSchemaBtn" onclick="clearSchema()" style="display:none">清空 Schema</button>
+      <button class="ghost" onclick="window.open('/schema','_blank')" id="schemaBtn" style="display:none">proto 原文</button>
+      <span class="hint" id="schemaMsg"></span>
+    </div>
+
+    <div id="schemaPanel"></div>
+
+    <div class="bar">
+      <select id="tableSel" onchange="loadKeys()"><option value="">全库（原始 key）</option></select>
+      <input type="text" id="prefix" placeholder="key 前缀（原始字节，选表后忽略）">
       <button onclick="loadKeys()">扫描</button>
-      <button class="ghost" onclick="window.open('/schema','_blank')" id="schemaBtn" style="display:none">Schema</button>
     </div>
     <table>
-      <thead><tr><th>Key</th><th style="width:90px">Size</th><th>Value 预览</th></tr></thead>
-      <tbody id="rows"><tr><td colspan="3" class="hint">输入前缀后点击「扫描」</td></tr></tbody>
+      <thead><tr><th style="width:150px">结构</th><th>Key</th><th style="width:80px">Size</th><th>Value 预览</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="4" class="hint">输入前缀或选择表后点击「扫描」</td></tr></tbody>
     </table>
     <div class="bar" style="margin-top:12px">
       <button class="ghost" id="prev" onclick="prevPage()" style="visibility:hidden">上一页</button>
       <button class="ghost" id="next" onclick="nextPage()" style="visibility:hidden">下一页</button>
       <span class="hint" id="pageinfo"></span>
     </div>
-    <div id="detail"><h3 id="dTitle"></h3><pre id="dBody"></pre></div>
+    <div id="detail"></div>
   </main>
   <script type="module" src="/src/main.js"></script>
 </body>

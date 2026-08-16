@@ -3,12 +3,15 @@ import './style.css'
 let cursors = []
 let nextCursor = ''
 let prefix = ''
+let schema = null // {source, tables:[...]}
 
 const fmtBytes = (n) =>
   n == null ? '-' : n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(2) + ' MB'
 
 const esc = (s) =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+// ---- 统计卡片 ----
 
 async function loadStats() {
   const r = await (await fetch('/api/stats')).json()
@@ -27,6 +30,79 @@ async function loadStats() {
   if (ok) document.getElementById('schemaBtn').style.display = 'inline-block'
 }
 
+// ---- Schema 导入与表结构展示 ----
+
+async function loadSchema() {
+  const r = await (await fetch('/api/schema')).json()
+  schema = r.tables && r.tables.length ? r : null
+  renderSchema()
+}
+
+async function importSchema(file) {
+  const msg = document.getElementById('schemaMsg')
+  msg.textContent = '解析中…'
+  const fd = new FormData()
+  fd.append('file', file, file.name)
+  const resp = await fetch('/api/schema', { method: 'POST', body: fd })
+  const r = await resp.json()
+  if (!resp.ok) {
+    msg.textContent = ''
+    alert('Schema 解析失败：\n' + (r.error || resp.statusText))
+    return
+  }
+  msg.textContent = '已导入 ' + r.source + '（' + r.tables.length + ' 张表）'
+  schema = r
+  renderSchema()
+}
+
+async function clearSchema() {
+  await fetch('/api/schema', { method: 'DELETE' })
+  schema = null
+  document.getElementById('schemaMsg').textContent = ''
+  document.getElementById('protoFile').value = ''
+  renderSchema()
+}
+
+function renderSchema() {
+  const panel = document.getElementById('schemaPanel')
+  const sel = document.getElementById('tableSel')
+  document.getElementById('clearSchemaBtn').style.display = schema ? 'inline-block' : 'none'
+  if (!schema) {
+    panel.innerHTML = ''
+    sel.innerHTML = '<option value="">全库（原始 key）</option>'
+    return
+  }
+  // 表结构卡片
+  panel.innerHTML = schema.tables
+    .map((t) => {
+      const badges =
+        '<span class="badge">TableID ' + t.table_id + '</span>' +
+        '<span class="badge">PK: ' + esc(t.primary_key.name) + ' (' + esc(t.primary_key.type) + ')</span>' +
+        (t.has_ttl ? '<span class="badge warn">TTL ' + esc(t.ttl || '') + '</span>' : '') +
+        '<span class="badge">' + t.fields.length + ' 字段</span>'
+      const rows = t.fields
+        .map(
+          (f) =>
+            '<tr><td>' + esc(f.name) + (f.primary ? ' <span class="pk">PK</span>' : '') + '</td><td>' + esc(f.type) +
+            '</td><td>' + (f.index !== 'none' ? '<span class="badge ' + (f.index === 'unique' ? 'ok' : '') + '">' + f.index + '</span>' : '-') +
+            '</td><td>' + (f.compress ? 'zstd' : '-') + '</td><td>' + (f.repeated ? 'yes' : '-') + '</td></tr>',
+        )
+        .join('')
+      return (
+        '<div class="schema-table"><div class="schema-head"><b>' + esc(t.message) + '</b> ' + badges + '</div>' +
+        '<table class="fields"><thead><tr><th>字段</th><th>类型</th><th>索引</th><th>压缩</th><th>repeated</th></tr></thead><tbody>' +
+        rows + '</tbody></table></div>'
+      )
+    })
+    .join('')
+  // 表选择器
+  sel.innerHTML =
+    '<option value="">全库（原始 key）</option>' +
+    schema.tables.map((t) => '<option value="' + t.table_id + '">' + esc(t.message) + '</option>').join('')
+}
+
+// ---- Key 浏览（schema 感知） ----
+
 function loadKeys() {
   prefix = document.getElementById('prefix').value
   cursors = ['']
@@ -35,33 +111,41 @@ function loadKeys() {
 
 async function fetchPage(cur) {
   const u = new URL('/api/keys', location)
-  u.searchParams.set('prefix', prefix)
+  const tableID = document.getElementById('tableSel').value
+  if (tableID) u.searchParams.set('table_id', tableID)
+  else u.searchParams.set('prefix', prefix)
   if (cur) u.searchParams.set('cursor', cur)
   const r = await (await fetch(u)).json()
   const tb = document.getElementById('rows')
   if (!r.entries || !r.entries.length) {
-    tb.innerHTML = '<tr><td colspan="3" class="hint">无数据</td></tr>'
+    tb.innerHTML = '<tr><td colspan="4" class="hint">无数据</td></tr>'
   } else {
-    tb.innerHTML = r.entries
-      .map(
-        (e) =>
-          '<tr class="row" onclick="showDetail(\'' +
-          e.key_b64 +
-          '\')"><td>' +
-          esc(e.key) +
-          '</td><td class="num">' +
-          e.size +
-          '</td><td class="hint">' +
-          esc(e.preview) +
-          '</td></tr>',
-      )
-      .join('')
+    tb.innerHTML = r.entries.map((e) => '<tr class="row" onclick="showDetail(\'' + e.key_b64 + '\')">' +
+      '<td>' + structCell(e.decoded) + '</td>' +
+      '<td>' + esc(e.key) + '</td>' +
+      '<td class="num">' + e.size + '</td>' +
+      '<td class="hint">' + esc(e.preview) + '</td></tr>').join('')
   }
   nextCursor = r.next_cursor || ''
   document.getElementById('next').style.visibility = nextCursor ? 'visible' : 'hidden'
   document.getElementById('prev').style.visibility = cursors.length > 1 ? 'visible' : 'hidden'
   document.getElementById('pageinfo').textContent = (r.entries ? r.entries.length : 0) + ' 条 / 页'
 }
+
+// 结构列：data → 表名+PK；index → 表名+索引字段；无 schema → —
+function structCell(d) {
+  if (!d) return '<span class="hint">—</span>'
+  if (d.kind === 'data') {
+    return '<span class="badge ok">行</span> ' + esc(d.table) + '<br><span class="hint">PK ' + esc(fmtVal(d.pk)) + '</span>'
+  }
+  if (d.kind === 'index') {
+    return '<span class="badge">索引</span> ' + esc(d.table || '?') +
+      (d.index_field ? '<br><span class="hint">' + esc(d.index_field) + ' = ' + esc(fmtVal(d.index_value)) + '</span>' : '')
+  }
+  return '<span class="hint">未知</span>'
+}
+
+const fmtVal = (v) => (v == null ? '' : typeof v === 'string' && v.length > 48 ? v.slice(0, 48) + '…' : String(v))
 
 function nextPage() {
   if (!nextCursor) return
@@ -75,13 +159,34 @@ function prevPage() {
   fetchPage(cursors[cursors.length - 1])
 }
 
+// ---- 记录详情：优先 schema 语义化字段，保底十六进制 ----
+
 async function showDetail(b64) {
   const r = await (await fetch('/api/key?k=' + b64)).json()
   const box = document.getElementById('detail')
   box.style.display = 'block'
-  document.getElementById('dTitle').textContent =
-    '记录详情 · ' + (r.key_print || r.key_hex) + ' · ' + r.size + ' 字节'
-  document.getElementById('dBody').textContent = r.value_hex ? hexDump(r.value_hex, r.value_print) : '(空)'
+  const title = '记录详情 · ' + (r.key_print || r.key_hex) + ' · ' + r.size + ' 字节'
+
+  let semantic = ''
+  if (r.decoded_value) {
+    const dv = r.decoded_value
+    let head = ''
+    if (dv.expires_at) {
+      head = '<div class="schema-head">过期时间: ' + esc(dv.expires_at) +
+        (dv.expired ? ' <span class="badge warn">已过期</span>' : ' <span class="badge ok">存活</span>') + '</div>'
+    }
+    const rows = (dv.fields || [])
+      .map((f) => '<tr><td>' + esc(f.name) + '</td><td>' + esc(f.type) + '</td><td class="val">' +
+        esc(f.value) + (f.truncated ? ' <span class="hint">(截断)</span>' : '') + '</td></tr>')
+      .join('')
+    semantic = head + '<table class="fields"><thead><tr><th>字段</th><th>类型</th><th>值</th></tr></thead><tbody>' + rows + '</tbody></table>'
+  }
+
+  document.getElementById('dTitle').textContent = ''
+  box.innerHTML = '<h3 id="dTitle">' + esc(title) + '</h3>' +
+    (semantic || '') +
+    '<h3 style="margin-top:12px">原始字节</h3><pre id="dBody">' +
+    esc(r.value_hex ? hexDump(r.value_hex, r.value_print) : '(空)') + '</pre>'
 }
 
 // 将十六进制串渲染为 offset + 16 字节/行的经典转储格式
@@ -99,10 +204,18 @@ function hexDump(hexStr, printStr) {
   return out
 }
 
+// ---- 事件绑定与初始化 ----
+
+document.getElementById('protoFile').addEventListener('change', (e) => {
+  if (e.target.files.length) importSchema(e.target.files[0])
+})
+
 // inline onclick 需要
 window.loadKeys = loadKeys
 window.nextPage = nextPage
 window.prevPage = prevPage
 window.showDetail = showDetail
+window.clearSchema = clearSchema
 
 loadStats()
+loadSchema()

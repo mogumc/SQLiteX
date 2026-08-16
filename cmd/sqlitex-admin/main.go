@@ -15,11 +15,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -47,6 +49,18 @@ func main() {
 		db:        db,
 		dir:       *dir,
 		protoPath: *protoPath,
+		schema:    newSchemaStore(),
+	}
+
+	// 启动时自动导入 -proto 指定的 Schema（仅解析展示，失败不阻断启动）
+	if *protoPath != "" {
+		if data, err := os.ReadFile(*protoPath); err != nil {
+			log.Printf("read proto: %v", err)
+		} else if err := srv.schema.importProto(filepath.Base(*protoPath), string(data)); err != nil {
+			log.Printf("import proto schema: %v", err)
+		} else {
+			log.Printf("schema imported: %s", *protoPath)
+		}
 	}
 
 	uiFS, err := embeddedUI()
@@ -59,7 +73,8 @@ func main() {
 	mux.HandleFunc("/api/stats", srv.handleStats)
 	mux.HandleFunc("/api/keys", srv.handleKeys)
 	mux.HandleFunc("/api/key", srv.handleKey)
-	mux.HandleFunc("/schema", srv.handleSchema)
+	mux.HandleFunc("/api/schema", srv.handleSchemaAPI)
+	mux.HandleFunc("/schema", srv.handleSchemaText)
 
 	log.Printf("sqlitex-admin listening on http://%s (dir=%s)", *addr, *dir)
 	if err := http.ListenAndServe(*addr, mux); err != nil {
@@ -72,14 +87,16 @@ type adminServer struct {
 	db        *pebble.DB
 	dir       string
 	protoPath string
+	schema    *schemaStore
 }
 
 // keyEntry 是 /api/keys 返回的单条记录摘要。
 type keyEntry struct {
-	Key     string `json:"key"`     // 尽力可读形式（不可打印字符转 \xNN）
-	KeyB64  string `json:"key_b64"` // 原始 key 的 base64，用作游标与详情查询
-	Size    int    `json:"size"`    // value 字节数
-	Preview string `json:"preview"` // value 可打印片段（≤64 字节）
+	Key     string      `json:"key"`               // 尽力可读形式（不可打印字符转 \xNN）
+	KeyB64  string      `json:"key_b64"`           // 原始 key 的 base64，用作游标与详情查询
+	Size    int         `json:"size"`              // value 字节数
+	Preview string      `json:"preview"`           // value 可打印片段（≤64 字节）
+	Decoded *decodedKey `json:"decoded,omitempty"` // schema 导入后的语义化解码
 }
 
 // keysResponse 是 /api/keys 的分页响应。
@@ -130,7 +147,8 @@ func (s *adminServer) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleKeys 按 prefix 前缀扫描 + cursor 游标分页（O(1) Seek，与引擎侧一致）。
-// 参数：prefix（原始字符串）、cursor（base64 的上页末 key）、limit（默认 50，上限 500）。
+// 参数：prefix（原始字符串）、cursor（base64 的上页末 key）、limit（默认 50，上限 500）、
+// table_id（表过滤：仅扫描该表数据行，与生成代码的表前缀扫描同一物理语义）。
 func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 	prefix := r.URL.Query().Get("prefix")
 	limit := 50
@@ -138,6 +156,17 @@ func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		if n := atoiClamp(v, 1, 500); n > 0 {
 			limit = n
 		}
+	}
+
+	// 表级过滤：物理前缀 [TableID Uvarint]（uvarint 编码首字节天然无歧义，
+	// 0xFF 索引空间不会落入任何表前缀，与生成代码 EncodeKey(tableID, nil) 一致）
+	if v := r.URL.Query().Get("table_id"); v != "" {
+		tableID, ok := parseUint64(v)
+		if !ok {
+			httpError(w, http.StatusBadRequest, fmt.Errorf("invalid table_id"))
+			return
+		}
+		prefix = string(dataKeyPrefix(tableID))
 	}
 
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte(prefix)})
@@ -176,17 +205,21 @@ func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		if len(pv) > 64 {
 			pv = pv[:64]
 		}
-		resp.Entries = append(resp.Entries, keyEntry{
+		entry := keyEntry{
 			Key:     printable(k),
 			KeyB64:  base64.RawURLEncoding.EncodeToString(k),
 			Size:    len(v),
 			Preview: printable(pv),
-		})
+		}
+		if d := s.schema.decodeKey(k); d.Kind != "unknown" {
+			entry.Decoded = &d
+		}
+		resp.Entries = append(resp.Entries, entry)
 	}
 	writeJSON(w, resp)
 }
 
-// handleKey 返回单条记录的完整十六进制转储。
+// handleKey 返回单条记录的完整视图：原始十六进制转储 + schema 语义化解码。
 // 参数：k（base64 编码的原始 key）。
 func (s *adminServer) handleKey(w http.ResponseWriter, r *http.Request) {
 	kb, err := base64.RawURLEncoding.DecodeString(r.URL.Query().Get("k"))
@@ -200,17 +233,70 @@ func (s *adminServer) handleKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer closer.Close()
-	writeJSON(w, map[string]any{
+
+	resp := map[string]any{
 		"key_hex":     hex.EncodeToString(kb),
 		"key_print":   printable(kb),
 		"size":        len(val),
 		"value_hex":   hex.EncodeToString(val),
 		"value_print": printable(val),
-	})
+	}
+
+	// schema 语义化：Key 归属 + Value 逐字段解码
+	if d := s.schema.decodeKey(kb); d.Kind == "data" {
+		if ts := s.schema.tableOf(kb); ts != nil {
+			resp["decoded_key"] = d
+			resp["decoded_value"] = s.schema.decodeValue(ts, val)
+		}
+	} else if d.Kind == "index" {
+		// 索引键的 value 即 PK bytes（见生成代码 EncodeIndexKey 的写入侧）
+		if ts := s.schema.tableOfIndex(kb); ts != nil {
+			d.PK = decodePK(ts, val)
+		}
+		resp["decoded_key"] = d
+	}
+	writeJSON(w, resp)
 }
 
-// handleSchema 输出 .proto 原文（提供 -proto 时）。
-func (s *adminServer) handleSchema(w http.ResponseWriter, r *http.Request) {
+// handleSchemaAPI 管理已导入的库表结构。
+// GET → 当前 schema；POST(multipart file) → 导入 .proto 并解析；DELETE → 清空。
+func (s *adminServer) handleSchemaAPI(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		source, tables := s.schema.snapshot()
+		writeJSON(w, map[string]any{"source": source, "tables": tables})
+	case http.MethodPost:
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			httpError(w, http.StatusBadRequest, fmt.Errorf("multipart field 'file' required: %v", err))
+			return
+		}
+		defer file.Close()
+		data, err := io.ReadAll(io.LimitReader(file, 4<<20)) // 4MB 上限
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		name := header.Filename
+		if name == "" {
+			name = "uploaded.proto"
+		}
+		if err := s.schema.importProto(name, string(data)); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		source, tables := s.schema.snapshot()
+		writeJSON(w, map[string]any{"source": source, "tables": tables})
+	case http.MethodDelete:
+		s.schema.clear()
+		writeJSON(w, map[string]any{"source": "", "tables": []any{}})
+	default:
+		httpError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed", r.Method))
+	}
+}
+
+// handleSchemaText 输出 .proto 原文（提供 -proto 时）。
+func (s *adminServer) handleSchemaText(w http.ResponseWriter, r *http.Request) {
 	if s.protoPath == "" {
 		httpError(w, http.StatusNotFound, fmt.Errorf("no proto file configured (-proto)"))
 		return
@@ -303,4 +389,10 @@ func httpError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+// parseUint64 解析非负整数查询参数。
+func parseUint64(s string) (uint64, bool) {
+	v, err := strconv.ParseUint(s, 10, 64)
+	return v, err == nil
 }

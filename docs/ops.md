@@ -53,13 +53,22 @@ go build -o sqlitex-admin ./cmd/sqlitex-admin
 
 | 页面/端点 | 说明 |
 | --- | --- |
-| `/` | 单页面板：存储概览卡片 + Key 浏览器 |
+| `/` | 单页面板：存储概览卡片 + Schema 面板 + Key 浏览器 |
+| `/api/schema` | **导入 .proto 并解析出真实库表结构**（表/字段/主键/索引/TTL/压缩），GET 查询 / POST 上传 / DELETE 清空 |
 | `/api/stats` | 磁盘占用 / 活跃数据 / WAL / MemTable / SSTable 数（JSON） |
-| `/api/keys?prefix=&cursor=&limit=` | 前缀扫描 + 游标分页（O(1) Seek，与引擎侧一致） |
-| `/api/key?k=<base64>` | 单条记录十六进制转储 + 可读预览 |
+| `/api/keys?table_id=&cursor=&limit=` | 表级过滤 + 游标分页（O(1) Seek）；schema 导入后返回语义化解码（表名/主键/索引字段） |
+| `/api/key?k=<base64>` | 记录详情：schema 字段级解码（含 zstd 压缩字段还原、TTL 过期判定）+ 原始十六进制转储 |
 | `/schema` | `.proto` 原文（需 `-proto` 参数） |
 
-只读打开保证面板误操作不可能污染生产数据。Key 以「尽力可读」形式展示（不可打印字节转 `\xNN`）。
+只读打开保证面板误操作不可能污染生产数据。
+
+### Schema 导入与结构化解码
+
+面板右上角「导入 Schema (.proto)」上传业务 proto 文件（或启动时 `-proto` 自动导入）后：
+
+- **表结构视图**：按 proto 解析出每张表的 TableID、主键、字段类型、二级索引（unique/normal）、压缩标记与 TTL——与 `protoc-gen-sqlitex` 代码生成走同一条 IR 提取路径，编号与语义严格一致；
+- **Key 语义化**：原始字节 Key 解码为 `表名 + 主键值`（数据行）或 `表名 + 索引字段 = 值`（索引键），表选择器按表过滤扫描；
+- **Value 字段级解码**：扁平 Value 按字段类型逐个还原（定长标量 / 变长字符串 / zstd 压缩字段自动解压），TTL 表显示过期时间与存活状态；解码失败的字段保留原始十六进制兜底。
 
 ### 前端独立编译与嵌入
 
