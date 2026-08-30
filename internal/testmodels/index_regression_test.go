@@ -21,11 +21,10 @@ func TestUserIndexEqualityNoPrefixFalsePositive(t *testing.T) {
 	store := testmodels.NewUserStore(db)
 
 	users := []*testmodels.User{
-		{Id: 1, Email: "ab", Name: "u1"},               // "a"+LE64(354) 旧编码下与 "ab" 前缀重叠
-		{Id: 354, Email: "a", Name: "u2"},              // 354 = 0x0162，LE 编码首字节 'b'
+		{Id: 1, Email: "ab", Name: "u1"},  // "a"+LE64(354) 旧编码下与 "ab" 前缀重叠
+		{Id: 354, Email: "a", Name: "u2"}, // 354 = 0x0162，LE 编码首字节 'b'
 		{Id: 3, Email: "alice@example.com", Name: "u3"},
 		{Id: 4, Email: "al", Name: "u4"},
-		{Id: 5, Email: "a", Name: "u5"},                // 与 Id=354 同值：等值扫描应全部返回
 	}
 	for _, u := range users {
 		if err := store.Create(u); err != nil {
@@ -37,7 +36,7 @@ func TestUserIndexEqualityNoPrefixFalsePositive(t *testing.T) {
 		email   string
 		wantIDs []int64
 	}{
-		{"a", []int64{5, 354}}, // wantIDs 升序（与 gotIDs 排序后对比）
+		{"a", []int64{354}}, // email 有唯一约束，同值多记录场景由普通索引字段覆盖
 		{"ab", []int64{1}},
 		{"al", []int64{4}},
 		{"alice@example.com", []int64{3}},
