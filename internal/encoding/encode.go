@@ -83,6 +83,15 @@ func EncodeIndexPrefix(tableID uint64, fieldNum int32, fieldValue []byte) []byte
 	return buf
 }
 
+// EncodeUniqueIndexKey 构造唯一索引的物理 Key。
+// 与普通索引不同，唯一索引 Key 不携带 PK 后缀：同一字段值在键空间中至多存在
+// 一个条目，重复值天然复用同一物理 Key；PK 存放在 Value 中。
+// 这使得 Create/Update 可以用一次 O(1) Get 检查冲突，等值扫描也退化为点查。
+// 布局与 EncodeIndexPrefix 相同: [0xFF][TableID Uvarint][FieldNum byte][ValueLen Uvarint][FieldValue]
+func EncodeUniqueIndexKey(tableID uint64, fieldNum int32, fieldValue []byte) []byte {
+	return EncodeIndexPrefix(tableID, fieldNum, fieldValue)
+}
+
 // DecodeKey 从物理 Key 中还原 TableID 与 PrimaryKey。
 // 返回的 pk 切片与 raw 共享底层数组，调用方不得修改。
 func DecodeKey(raw []byte) (tableID uint64, pk []byte, err error) {

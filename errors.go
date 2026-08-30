@@ -22,4 +22,8 @@ var (
 
 	// ErrMemoryExceeded 全局内存用量超过配置阈值。
 	ErrMemoryExceeded = errors.New("sqlitex: memory usage exceeded limit")
+
+	// ErrDuplicateKey 违反唯一索引约束：Create/Update 的字段值与既有记录冲突。
+	// 通过 errors.Is 匹配；写入未发生（检查在 WriteBatch 提交前）。
+	ErrDuplicateKey = errors.New("sqlitex: duplicate key in unique index")
 )

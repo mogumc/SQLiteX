@@ -169,6 +169,36 @@ func TestEncodeIndexPrefix_NoFalsePositive(t *testing.T) {
 	}
 }
 
+// TestEncodeUniqueIndexKey 验证唯一索引 Key 与等值扫描前缀同构，
+// 且不携带 PK 后缀（DecodeIndexKey 解出空 pk）。
+func TestEncodeUniqueIndexKey(t *testing.T) {
+	value := []byte("a@b.com")
+	unique := EncodeUniqueIndexKey(1, 3, value)
+	prefix := EncodeIndexPrefix(1, 3, value)
+	if !bytes.Equal(unique, prefix) {
+		t.Errorf("unique key %x != index prefix %x", unique, prefix)
+	}
+
+	// 唯一键 = 前缀键：携带同值 PK 的普通索引条目必须命中唯一键前缀，
+	// 这保证唯一索引值仍可被等值扫描（execIndexed）正确检索。
+	normal := EncodeIndexKey(1, 3, value, []byte("pk1"))
+	if !bytes.HasPrefix(normal, unique) {
+		t.Errorf("normal entry %x does not match unique key prefix %x", normal, unique)
+	}
+
+	// 唯一键自解码：pk 部分为空
+	_, _, gotValue, gotPK, err := DecodeIndexKey(unique)
+	if err != nil {
+		t.Fatalf("DecodeIndexKey err: %v", err)
+	}
+	if !bytes.Equal(gotValue, value) {
+		t.Errorf("fieldValue: got %x, want %x", gotValue, value)
+	}
+	if len(gotPK) != 0 {
+		t.Errorf("pk: got %x, want empty", gotPK)
+	}
+}
+
 // TestDecodeIndexKey_Malformed 验证截断/伪造的索引键返回 ErrMalformedKey。
 func TestDecodeIndexKey_Malformed(t *testing.T) {
 	tests := []struct {
