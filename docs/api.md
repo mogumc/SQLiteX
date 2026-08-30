@@ -234,10 +234,12 @@ Key 布局：
 
 ```
 数据行: [TableID Uvarint][PrimaryKey]
-索引行: [0xFF][TableID Uvarint][FieldNum Varint][FieldValue][PrimaryKey]
+索引行: [0xFF][TableID Uvarint][FieldNum Varint][ValueLen Uvarint][FieldValue][PrimaryKey]
 ```
 
-`0xFF` 前缀使索引行与数据行隔离，避免键冲突。
+`0xFF` 前缀使索引行与数据行隔离，避免键冲突。`ValueLen` 长度前缀保证 FieldValue
+与 PrimaryKey 的边界无歧义：等值索引扫描只命中字段值完全相等的记录，不会误命中
+"字段值是目标值前缀" 的其他记录。
 
 ---
 
