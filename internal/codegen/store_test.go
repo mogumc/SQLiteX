@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/types/descriptorpb"
+
+	sqlitexpb "github.com/mogumc/sqlitex/proto/sqlitex"
 )
 
 func TestGenerateStore(t *testing.T) {
@@ -138,6 +140,100 @@ func TestGenerateStoreNoTTL(t *testing.T) {
 	}
 	if !strings.Contains(code, "value := m.Serialize()") {
 		t.Error("non-TTL store should serialize with plain Serialize()")
+	}
+}
+
+// TestGenerateStoreUniqueIndex 验证唯一索引字段生成冲突检查与无 PK 后缀的唯一键维护代码，
+// 且普通索引字段不受影响。
+func TestGenerateStoreUniqueIndex(t *testing.T) {
+	table := &TableIR{
+		MessageName: "User",
+		GoPackage:   "genpkg",
+		TableID:     1,
+		PrimaryKey: &FieldIR{
+			Name:      "id",
+			GoName:    "Id",
+			GoType:    "int64",
+			ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64,
+			Number:    1,
+		},
+		IndexedFields: []*FieldIR{
+			{Name: "email", GoName: "Email", GoType: "string", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_STRING, Number: 3, Index: sqlitexpb.IndexOption_INDEX_UNIQUE},
+			{Name: "created_at", GoName: "CreatedAt", GoType: "int64", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64, Number: 4},
+		},
+		Fields: []*FieldIR{
+			{Name: "id", GoType: "int64", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64, Number: 1, IsPrimaryKey: true},
+			{Name: "email", GoName: "Email", GoType: "string", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_STRING, Number: 3, Index: sqlitexpb.IndexOption_INDEX_UNIQUE},
+			{Name: "created_at", GoName: "CreatedAt", GoType: "int64", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64, Number: 4},
+		},
+	}
+
+	code := GenerateStore(table)
+
+	// bytes import（bytes.Equal 用于自身持有判断）
+	if !strings.Contains(code, `"bytes"`) {
+		t.Error("unique index store should import bytes")
+	}
+
+	// Create: 冲突检查 + ErrDuplicateKey + 无 PK 后缀的唯一键写入
+	if !strings.Contains(code, "encoding.EncodeUniqueIndexKey(s.tableID, 3, encodeUserIndexEmailValue(m.Email))") {
+		t.Error("Create should check and write pk-less unique key for email")
+	}
+	if !strings.Contains(code, "!bytes.Equal(existing, pkBytes)") {
+		t.Error("Create/Update should allow self-owned unique entry")
+	}
+	if !strings.Contains(code, "sqlitex.ErrDuplicateKey") {
+		t.Error("conflict path should wrap sqlitex.ErrDuplicateKey")
+	}
+
+	// Update/Delete: 唯一索引用无 PK 后缀键清理
+	if !strings.Contains(code, "encoding.EncodeUniqueIndexKey(s.tableID, 3, encodeUserIndexEmailValue(old.Email))") {
+		t.Error("Update/Delete should clean up pk-less unique key")
+	}
+
+	// 普通索引仍为带 PK 后缀键
+	if !strings.Contains(code, "encoding.EncodeIndexKey(s.tableID, 4, encodeUserIndexCreatedAtValue(m.CreatedAt), pkBytes)") {
+		t.Error("normal index should keep pk-suffixed key")
+	}
+
+	// 唯一索引字段绝不能生成带 PK 后缀的写入/清理
+	if strings.Count(code, "EncodeIndexKey(s.tableID, 3") > 0 {
+		t.Error("unique field must never use pk-suffixed EncodeIndexKey")
+	}
+}
+
+// TestGenerateStoreNoUniqueIndex 验证无唯一索引的表不生成冲突检查代码，也不引入 bytes import。
+func TestGenerateStoreNoUniqueIndex(t *testing.T) {
+	table := &TableIR{
+		MessageName: "Session",
+		GoPackage:   "genpkg",
+		TableID:     2,
+		PrimaryKey: &FieldIR{
+			Name:      "id",
+			GoName:    "Id",
+			GoType:    "int64",
+			ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64,
+			Number:    1,
+		},
+		IndexedFields: []*FieldIR{
+			{Name: "user_id", GoName: "UserId", GoType: "string", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_STRING, Number: 3},
+		},
+		Fields: []*FieldIR{
+			{Name: "id", GoType: "int64", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_INT64, Number: 1, IsPrimaryKey: true},
+			{Name: "user_id", GoName: "UserId", GoType: "string", ProtoType: descriptorpb.FieldDescriptorProto_TYPE_STRING, Number: 3},
+		},
+	}
+
+	code := GenerateStore(table)
+
+	if strings.Contains(code, "EncodeUniqueIndexKey") {
+		t.Error("table without unique index should not generate unique key code")
+	}
+	if strings.Contains(code, `"bytes"`) {
+		t.Error("table without unique index should not import bytes")
+	}
+	if strings.Contains(code, "ErrDuplicateKey") {
+		t.Error("table without unique index should not reference ErrDuplicateKey")
 	}
 }
 

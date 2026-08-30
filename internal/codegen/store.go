@@ -30,7 +30,10 @@ type storeData struct {
 	PKGoName      string // Id
 	PKGoType      string // int64
 	TableID       uint64
-	IndexedFields []indexField // 二级索引字段列表
+	IndexedFields []indexField // 全部二级索引字段（唯一 + 普通）
+	UniqueFields  []indexField // 唯一索引字段（键不带 PK 后缀，Value 存 PK）
+	NormalFields  []indexField // 普通索引字段（键带 PK 后缀）
+	HasUnique     bool         // 是否存在唯一索引字段（决定 bytes import）
 	HasTTL        bool         // 是否声明记录级 TTL
 	TTL           int64        // TTL 纳秒时长
 }
@@ -46,15 +49,21 @@ type indexField struct {
 
 func buildStoreData(table *TableIR) storeData {
 	pk := table.PrimaryKey
-	var idxFields []indexField
+	var idxFields, uniqueFields, normalFields []indexField
 	for _, f := range table.IndexedFields {
-		idxFields = append(idxFields, indexField{
+		idx := indexField{
 			GoName:    toGoName(f.Name),
 			ProtoName: f.Name,
 			GoType:    f.GoType,
 			FieldNum:  f.Number,
 			IsUnique:  f.Index == 2, // INDEX_UNIQUE
-		})
+		}
+		idxFields = append(idxFields, idx)
+		if idx.IsUnique {
+			uniqueFields = append(uniqueFields, idx)
+		} else {
+			normalFields = append(normalFields, idx)
+		}
 	}
 	return storeData{
 		MessageName:   table.MessageName,
@@ -66,6 +75,9 @@ func buildStoreData(table *TableIR) storeData {
 		PKGoType:      pk.GoType,
 		TableID:       table.TableID,
 		IndexedFields: idxFields,
+		UniqueFields:  uniqueFields,
+		NormalFields:  normalFields,
+		HasUnique:     len(uniqueFields) > 0,
 		HasTTL:        table.HasTTL,
 		TTL:           int64(table.TTL),
 	}
@@ -86,6 +98,9 @@ func lowerFirst(s string) string {
 var storeTmpl = `package {{.PackageName}}
 
 import (
+{{- if .HasUnique}}
+	"bytes"
+{{- end}}
 	"encoding/binary"
 	"fmt"
 {{- if .HasTTL}}
@@ -97,6 +112,7 @@ import (
 )
 
 // {{.StoreName}} 是 {{.MessageName}} 的强类型存储接口。
+// Create/Update 在唯一索引字段值冲突时返回错误，可用 errors.Is(err, sqlitex.ErrDuplicateKey) 匹配。
 type {{.StoreName}} interface {
 	Create(m *{{.MessageName}}) error
 	Update(m *{{.MessageName}}) error
@@ -120,8 +136,9 @@ func New{{.StoreName}}(db *sqlitex.DB) {{.StoreName}} {
 	return &{{.StoreImpl}}{db: db, tableID: {{.TableID}}}
 }
 
-// Create 创建新的 {{.MessageName}} 记录。
-// 通过 WriteBatch 原子写入主数据行 + 所有二级索引。
+// Create 创建新的 {{.MessageName}} 记录（主键已存在时为覆盖语义）。
+// 通过 WriteBatch 原子写入主数据行 + 所有二级索引；唯一索引冲突时返回
+// errors.Is 可匹配的 sqlitex.ErrDuplicateKey，且不发生任何落盘。
 {{- if .HasTTL}}
 // 记录级 TTL: 写入时计算 expiresAt = now + {{.TTL}}ns，过期后惰性删除。
 {{- end}}
@@ -129,33 +146,7 @@ func (s *{{.StoreImpl}}) Create(m *{{.MessageName}}) error {
 	if m == nil {
 		return fmt.Errorf("sqlitex: cannot create nil {{.MessageName}}")
 	}
-	
-	pkBytes := encode{{.MessageName}}PrimaryKey(m.{{.PKGoName}})
-	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
-{{- if .HasTTL}}
-	value := m.SerializeWithExpiry(time.Now().UnixNano() + {{.TTL}})
-{{- else}}
-	value := m.Serialize()
-{{- end}}
-	
-	ops := make([]sqlitex.KVPair, 0, 1+{{len .IndexedFields}})
-	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
-	{{- range .IndexedFields}}
-	ops = append(ops, sqlitex.KVPair{
-		Key:   encoding.EncodeIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(m.{{.GoName}}), pkBytes),
-		Value: pkBytes,
-	})
-	{{- end}}
-	return s.db.WriteBatch(ops)
-}
 
-// Update 更新已存在的 {{.MessageName}} 记录。
-// 先 Get 旧值删除旧索引，再原子写入新数据+新索引。
-func (s *{{.StoreImpl}}) Update(m *{{.MessageName}}) error {
-	if m == nil {
-		return fmt.Errorf("sqlitex: cannot update nil {{.MessageName}}")
-	}
-	
 	pkBytes := encode{{.MessageName}}PrimaryKey(m.{{.PKGoName}})
 	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
 {{- if .HasTTL}}
@@ -163,26 +154,107 @@ func (s *{{.StoreImpl}}) Update(m *{{.MessageName}}) error {
 {{- else}}
 	value := m.Serialize()
 {{- end}}
-	ops := make([]sqlitex.KVPair, 0, 1+{{len .IndexedFields}}*2)
+
+	ops := make([]sqlitex.KVPair, 0, 1+2*{{len .IndexedFields}})
 	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
-	{{- if .IndexedFields}}
-	
-	// 获取旧值，删除旧索引条目
+{{- if .IndexedFields}}
+
+	// 覆盖创建：读取旧值并清理旧索引条目，防止旧唯一索引条目残留
+	// 导致其他记录的同值写入被误拒。
 	old, _ := s.Get(m.{{.PKGoName}})
 	if old != nil {
-		{{- range .IndexedFields}}
+		{{- range .UniqueFields}}
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeUniqueIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(old.{{.GoName}})),
+			Delete: true,
+		})
+		{{- end}}
+		{{- range .NormalFields}}
 		ops = append(ops, sqlitex.KVPair{
 			Key:    encoding.EncodeIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(old.{{.GoName}}), pkBytes),
 			Delete: true,
 		})
 		{{- end}}
 	}
-	{{- end}}{{- range .IndexedFields}}
+{{- end}}
+{{- range .UniqueFields}}
+	// 唯一索引 {{.ProtoName}} 冲突检查：唯一条目的 Value 为持有者 PK，
+	// 等于本记录 PK 视为覆盖自身，放行。检查与提交之间为 check-then-write，
+	// 极端并发窗口下可能双双通过（后写者覆盖唯一条目），见 docs/schema.md。
+	ukey{{.GoName}} := encoding.EncodeUniqueIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(m.{{.GoName}}))
+	if existing, err := s.db.Get(ukey{{.GoName}}); err != nil {
+		return fmt.Errorf("sqlitex: check unique index {{$.MessageName}}.{{.ProtoName}}: %w", err)
+	} else if existing != nil && !bytes.Equal(existing, pkBytes) {
+		return fmt.Errorf("sqlitex: create {{$.MessageName}}: unique index {{$.MessageName}}.{{.ProtoName}} conflict: %w", sqlitex.ErrDuplicateKey)
+	}
+	ops = append(ops, sqlitex.KVPair{Key: ukey{{.GoName}}, Value: pkBytes})
+{{- end}}
+{{- range .NormalFields}}
 	ops = append(ops, sqlitex.KVPair{
 		Key:   encoding.EncodeIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(m.{{.GoName}}), pkBytes),
 		Value: pkBytes,
 	})
-	{{- end}}
+{{- end}}
+	return s.db.WriteBatch(ops)
+}
+
+// Update 更新已存在的 {{.MessageName}} 记录。
+// 先 Get 旧值删除旧索引，再原子写入新数据+新索引。
+// 唯一索引字段值与既有记录冲突时返回 sqlitex.ErrDuplicateKey（自身持有则放行），
+// 此时 WriteBatch 未提交，不发生任何落盘。
+func (s *{{.StoreImpl}}) Update(m *{{.MessageName}}) error {
+	if m == nil {
+		return fmt.Errorf("sqlitex: cannot update nil {{.MessageName}}")
+	}
+
+	pkBytes := encode{{.MessageName}}PrimaryKey(m.{{.PKGoName}})
+	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
+{{- if .HasTTL}}
+	value := m.SerializeWithExpiry(time.Now().UnixNano() + {{.TTL}})
+{{- else}}
+	value := m.Serialize()
+{{- end}}
+	ops := make([]sqlitex.KVPair, 0, 1+2*{{len .IndexedFields}})
+	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
+{{- if .IndexedFields}}
+
+	// 获取旧值，删除旧索引条目
+	old, _ := s.Get(m.{{.PKGoName}})
+	if old != nil {
+		{{- range .UniqueFields}}
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeUniqueIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(old.{{.GoName}})),
+			Delete: true,
+		})
+		{{- end}}
+		{{- range .NormalFields}}
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(old.{{.GoName}}), pkBytes),
+			Delete: true,
+		})
+		{{- end}}
+	}
+{{- end}}
+{{- range .UniqueFields}}
+	// 唯一索引 {{.ProtoName}} 冲突检查：唯一条目的 Value 为持有者 PK，
+	// 等于本记录 PK 视为值未变更（自身持有），放行。
+	ukey{{.GoName}} := encoding.EncodeUniqueIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(m.{{.GoName}}))
+	if existing, err := s.db.Get(ukey{{.GoName}}); err != nil {
+		return fmt.Errorf("sqlitex: check unique index {{$.MessageName}}.{{.ProtoName}}: %w", err)
+	} else if existing != nil && !bytes.Equal(existing, pkBytes) {
+		return fmt.Errorf("sqlitex: update {{$.MessageName}}: unique index {{$.MessageName}}.{{.ProtoName}} conflict: %w", sqlitex.ErrDuplicateKey)
+	}
+{{- end}}
+{{- range .IndexedFields}}
+	ops = append(ops, sqlitex.KVPair{
+{{- if .IsUnique}}
+		Key:   encoding.EncodeUniqueIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(m.{{.GoName}})),
+{{- else}}
+		Key:   encoding.EncodeIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(m.{{.GoName}}), pkBytes),
+{{- end}}
+		Value: pkBytes,
+	})
+{{- end}}
 	return s.db.WriteBatch(ops)
 }
 
@@ -191,15 +263,21 @@ func (s *{{.StoreImpl}}) Update(m *{{.MessageName}}) error {
 func (s *{{.StoreImpl}}) Delete({{.PKGoName}} {{.PKGoType}}) error {
 	pkBytes := encode{{.MessageName}}PrimaryKey({{.PKGoName}})
 	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
-	
+
 	ops := make([]sqlitex.KVPair, 0, 1+{{len .IndexedFields}})
 	ops = append(ops, sqlitex.KVPair{Key: dataKey, Delete: true})
 	{{- if .IndexedFields}}
-	
+
 	// 获取旧值以确定要删除的索引 Key
 	old, _ := s.Get({{.PKGoName}})
 	if old != nil {
-		{{- range .IndexedFields}}
+		{{- range .UniqueFields}}
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeUniqueIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(old.{{.GoName}})),
+			Delete: true,
+		})
+		{{- end}}
+		{{- range .NormalFields}}
 		ops = append(ops, sqlitex.KVPair{
 			Key:    encoding.EncodeIndexKey(s.tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(old.{{.GoName}}), pkBytes),
 			Delete: true,
@@ -293,7 +371,13 @@ func delete{{.MessageName}}WithIndexes(db *sqlitex.DB, tableID uint64, dataKey [
 {{- if .IndexedFields}}
 	ops := make([]sqlitex.KVPair, 0, 1+{{len .IndexedFields}})
 	ops = append(ops, sqlitex.KVPair{Key: dataKey, Delete: true})
-	{{- range .IndexedFields}}
+	{{- range .UniqueFields}}
+	ops = append(ops, sqlitex.KVPair{
+		Key:    encoding.EncodeUniqueIndexKey(tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(m.{{.GoName}})),
+		Delete: true,
+	})
+	{{- end}}
+	{{- range .NormalFields}}
 	ops = append(ops, sqlitex.KVPair{
 		Key:    encoding.EncodeIndexKey(tableID, {{.FieldNum}}, encode{{$.MessageName}}Index{{.GoName}}Value(m.{{.GoName}}), pkBytes),
 		Delete: true,
