@@ -112,7 +112,9 @@ import (
 )
 
 // {{.StoreName}} 是 {{.MessageName}} 的强类型存储接口。
+{{- if .HasUnique}}
 // Create/Update 在唯一索引字段值冲突时返回错误，可用 errors.Is(err, sqlitex.ErrDuplicateKey) 匹配。
+{{- end}}
 type {{.StoreName}} interface {
 	Create(m *{{.MessageName}}) error
 	Update(m *{{.MessageName}}) error
@@ -137,8 +139,10 @@ func New{{.StoreName}}(db *sqlitex.DB) {{.StoreName}} {
 }
 
 // Create 创建新的 {{.MessageName}} 记录（主键已存在时为覆盖语义）。
-// 通过 WriteBatch 原子写入主数据行 + 所有二级索引；唯一索引冲突时返回
-// errors.Is 可匹配的 sqlitex.ErrDuplicateKey，且不发生任何落盘。
+// 通过 WriteBatch 原子写入主数据行 + 所有二级索引。
+{{- if .HasUnique}}
+// 唯一索引冲突时返回 errors.Is 可匹配的 sqlitex.ErrDuplicateKey，且不发生任何落盘。
+{{- end}}
 {{- if .HasTTL}}
 // 记录级 TTL: 写入时计算 expiresAt = now + {{.TTL}}ns，过期后惰性删除。
 {{- end}}
@@ -200,8 +204,10 @@ func (s *{{.StoreImpl}}) Create(m *{{.MessageName}}) error {
 
 // Update 更新已存在的 {{.MessageName}} 记录。
 // 先 Get 旧值删除旧索引，再原子写入新数据+新索引。
+{{- if .HasUnique}}
 // 唯一索引字段值与既有记录冲突时返回 sqlitex.ErrDuplicateKey（自身持有则放行），
 // 此时 WriteBatch 未提交，不发生任何落盘。
+{{- end}}
 func (s *{{.StoreImpl}}) Update(m *{{.MessageName}}) error {
 	if m == nil {
 		return fmt.Errorf("sqlitex: cannot update nil {{.MessageName}}")

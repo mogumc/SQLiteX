@@ -85,18 +85,33 @@ func TestQueueDelete(t *testing.T) {
 }
 
 func TestQueueFull(t *testing.T) {
-	p := &mockPutter{}
+	// 复用本文件已有的 blockingPutter：首次 Set 阻塞，钉住消费者，
+	// 使"op1 被取走 → op2 入缓冲 → op3 被拒"的状态完全确定。
+	p := &blockingPutter{release: make(chan struct{})}
 	q := New(Config{MaxLen: 1, Putter: p}) // 容量为 1
-	defer q.Stop()
+	defer func() {
+		close(p.release) // 释放被阻塞的消费者，避免 Stop 死等
+		q.Stop()
+	}()
 
-	// 填满队列（后台 Goroutine 可能还没来得及消费）
+	// op1 被消费者取走后阻塞在 Set，队列缓冲空出
 	op1 := &WriteOp{Key: []byte("k1"), Value: []byte("v1"), Op: OpPut, Done: make(chan error, 1)}
-	q.Submit(op1)
+	if err := q.Submit(op1); err != nil {
+		t.Fatalf("submit op1: %v", err)
+	}
+	// 等 op1 确实被消费循环取走（缓冲为空、消费者阻塞在 Set）
+	for q.Len() != 0 {
+		time.Sleep(time.Millisecond)
+	}
 
-	// 第二个应该被拒绝
+	// op2 入缓冲后队列满，op3 必然被背压拒绝——消费者仍阻塞，状态确定
 	op2 := &WriteOp{Key: []byte("k2"), Value: []byte("v2"), Op: OpPut, Done: make(chan error, 1)}
-	if !errors.Is(q.Submit(op2), ErrFull) {
-		t.Errorf("expected ErrFull, got %v", q.Submit(op2))
+	if err := q.Submit(op2); err != nil {
+		t.Fatalf("submit op2: %v", err)
+	}
+	op3 := &WriteOp{Key: []byte("k3"), Value: []byte("v3"), Op: OpPut, Done: make(chan error, 1)}
+	if err := q.Submit(op3); !errors.Is(err, ErrFull) {
+		t.Errorf("expected ErrFull, got %v", err)
 	}
 }
 
