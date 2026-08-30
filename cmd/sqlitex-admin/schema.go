@@ -267,16 +267,19 @@ func (s *schemaStore) decodeKey(raw []byte) decodedKey {
 		d.Table = ts.Message
 		fieldNum := int32(raw[1+n])
 		rest := raw[2+n:]
-		// 索引键布局 [fieldValue][PK]：固定长度主键从尾部剥离；
-		// 变长主键无法从 key 本身切分，保留原始字节（详情接口会从 value 还原 PK）。
-		if pkLen := pkByteLen(ts); pkLen > 0 && len(rest) > pkLen {
-			rest = rest[:len(rest)-pkLen]
+		// 索引键布局 [ValueLen Uvarint][FieldValue][PK]：
+		// 长度前缀切出无歧义的 FieldValue/PK 边界（与 encoding.EncodeIndexKey 一致）。
+		vLen, nVal := binary.Uvarint(rest)
+		if nVal <= 0 || uint64(len(rest)-nVal) < vLen {
+			d.Kind = "unknown"
+			return d
 		}
+		fieldValue := rest[nVal : nVal+int(vLen)]
 		if idx, ok := ts.byFieldNum[fieldNum]; ok {
 			d.IndexField = ts.Fields[idx].Name
-			d.IndexValue = decodeScalarByType(ts.Fields[idx].protoType, rest)
+			d.IndexValue = decodeScalarByType(ts.Fields[idx].protoType, fieldValue)
 		} else {
-			d.IndexValue = printable(rest)
+			d.IndexValue = printable(fieldValue)
 		}
 		return d
 	}
@@ -293,17 +296,6 @@ func (s *schemaStore) decodeKey(raw []byte) decodedKey {
 	d.Table = ts.Message
 	d.PK = decodePK(ts, raw[n:])
 	return d
-}
-
-// pkByteLen 固定长度主键的编码字节数；变长主键（string/bytes）返回 0。
-func pkByteLen(ts *tableSchema) int {
-	switch ts.PrimaryKey.Type {
-	case "int64", "uint64":
-		return 8
-	case "int32", "uint32":
-		return 4
-	}
-	return 0
 }
 
 // comparePK 比较两个同表数据 Key 的主键顺序（数值感知）。

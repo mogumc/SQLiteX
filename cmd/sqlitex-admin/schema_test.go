@@ -82,9 +82,10 @@ func TestDecodeKeyDataAndIndex(t *testing.T) {
 		t.Errorf("data decode = %+v, want User/42", d)
 	}
 
-	// 索引键: [0xFF][1][fieldNum=3][email][PK]
+	// 索引键: [0xFF][1][fieldNum=3][ValueLen][email][PK]
+	// ValueLen 为 email 长度的 Uvarint（与 encoding.EncodeIndexKey 布局一致）。
 	email := []byte("a@b.com")
-	idxKey := []byte{0xFF, 1, 3}
+	idxKey := []byte{0xFF, 1, 3, byte(len(email))}
 	idxKey = append(idxKey, email...)
 	idxKey = append(idxKey, pk...)
 	d = s.decodeKey(idxKey)
