@@ -68,6 +68,15 @@ message Order {
 
 **索引字段支持的类型**：`string`、`[]bytes`、`int64`、`int32`、`uint64`、`bool`。其他类型（如 `float`）会退化为字符串编码，不推荐。
 
+#### 唯一索引（INDEX_UNIQUE）的强制语义
+
+`INDEX_UNIQUE` 由生成的 Store 在 **Create/Update 时强制**：
+
+- 物理布局：唯一索引行不携带 PK 后缀（`[0xFF][TableID][FieldNum][ValueLen][FieldValue]`），PK 存于行 Value 中。同一字段值在键空间中至多存在一个条目。
+- 冲突检查：Create/Update 提交前对每个唯一字段做一次 O(1) `Get`；值已被其他记录持有时返回 `ErrDuplicateKey`（`errors.Is` 匹配），**写入不落盘**。值由自身持有（值未变更的 Update、同主键覆盖 Create）时放行。
+- 覆盖创建：同主键重复 `Create` 为覆盖语义，旧记录的全部索引条目（含唯一）会被清理，旧值立即释放给其他记录使用。
+- 已知限制：冲突检查与 WriteBatch 提交之间为 check-then-write，**极端并发窗口下**（多 goroutine 同时创建同值记录）可能双双通过，最终唯一条目由后写者持有（前一记录数据行仍在，但不再被唯一索引指向）。进程内强一致需要写路径串行化，属后续演进项；单写者或低并发场景不受影响。
+
 ### TTL
 
 ```proto

@@ -134,6 +134,7 @@ var (
     ErrWriteThrottled  // 队列满或内存超限（背压）
     ErrQueueFull       // 内部，对外转为 ErrWriteThrottled
     ErrMemoryExceeded  // 内存超限
+    ErrDuplicateKey    // 唯一索引冲突（Create/Update 被拒，未落盘）
 )
 ```
 
@@ -233,13 +234,16 @@ func DecodeIndexKey(raw []byte) (tableID uint64, fieldNum int32, fieldValue, pk 
 Key 布局：
 
 ```
-数据行: [TableID Uvarint][PrimaryKey]
-索引行: [0xFF][TableID Uvarint][FieldNum Varint][ValueLen Uvarint][FieldValue][PrimaryKey]
+数据行:   [TableID Uvarint][PrimaryKey]
+索引行:   [0xFF][TableID Uvarint][FieldNum Varint][ValueLen Uvarint][FieldValue][PrimaryKey]
+唯一索引: [0xFF][TableID Uvarint][FieldNum Varint][ValueLen Uvarint][FieldValue]（无 PK 后缀，PK 存于 Value）
 ```
 
 `0xFF` 前缀使索引行与数据行隔离，避免键冲突。`ValueLen` 长度前缀保证 FieldValue
 与 PrimaryKey 的边界无歧义：等值索引扫描只命中字段值完全相等的记录，不会误命中
-"字段值是目标值前缀" 的其他记录。
+"字段值是目标值前缀" 的其他记录。唯一索引行不携带 PK 后缀，同一字段值在键空间中
+至多存在一个条目，Create/Update 据此以一次 O(1) Get 检查冲突，冲突返回
+`ErrDuplicateKey`（写入未落盘）。
 
 ---
 
