@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mockPutter 模拟底层写入。
@@ -142,4 +143,95 @@ func TestQueueConcurrency(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// blockingPutter 首次写入阻塞直到 release 收到信号，用于制造消费积压。
+type blockingPutter struct {
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingPutter) Set(key, value []byte) error {
+	p.once.Do(func() { <-p.release })
+	return nil
+}
+
+func (p *blockingPutter) Delete(key []byte) error { return nil }
+
+// TestSubmitStopRace 并发 Submit 与 Stop 的回归测试。
+// 修复前 Submit 的「检查 stopped → 发送」存在窗口，Stop 排空后
+// close channel 会触发 send on closed channel panic。
+// 需在 -race 下运行：多轮、多生产者与 Stop 并发，验证既不 panic、
+// 也不因 op 无应答而挂死（挂死会表现为测试超时）。
+func TestSubmitStopRace(t *testing.T) {
+	for round := 0; round < 100; round++ {
+		q := New(Config{MaxLen: 8, Putter: &mockPutter{}})
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		for g := 0; g < 8; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					op := &WriteOp{Key: []byte("k"), Value: []byte("v"), Op: OpPut, Done: make(chan error, 1)}
+					// 仅 Submit 成功时等待应答；ErrStopped/ErrFull 时
+					// 队列不负责应答，不得阻塞（与 db.submit 的用法一致）。
+					if err := q.Submit(op); err == nil {
+						<-op.Done
+					}
+				}
+			}()
+		}
+		time.Sleep(time.Millisecond)
+		close(stop)
+		q.Stop()
+		wg.Wait()
+	}
+}
+
+// TestStopRepliesDrainedOps Stop 时已入队未消费的操作必须收到
+// ErrStopped 或正常完成应答，调用方不得永久阻塞。
+func TestStopRepliesDrainedOps(t *testing.T) {
+	// 首次写入阻塞，把后续 op 积压在缓冲区
+	slow := &blockingPutter{release: make(chan struct{})}
+	q := New(Config{MaxLen: 64, Putter: slow})
+
+	type pending struct {
+		op  *WriteOp
+		err error
+	}
+	pendingOps := make([]pending, 0, 16)
+	for i := 0; i < 16; i++ {
+		op := &WriteOp{Key: []byte("k"), Value: []byte("v"), Op: OpPut, Done: make(chan error, 1)}
+		pendingOps = append(pendingOps, pending{op: op, err: q.Submit(op)})
+	}
+
+	// 放行被阻塞的写入并给消费者一点处理时间，随后 Stop
+	slow.release <- struct{}{}
+	time.Sleep(10 * time.Millisecond)
+	q.Stop()
+
+	drained := 0
+	for _, p := range pendingOps {
+		if p.err != nil {
+			continue
+		}
+		select {
+		case err := <-p.op.Done:
+			if err != nil && !errors.Is(err, ErrStopped) {
+				t.Fatalf("unexpected error for drained op: %v", err)
+			}
+			drained++
+		case <-time.After(5 * time.Second):
+			t.Fatal("op submitted before Stop never answered: caller would hang")
+		}
+	}
+	if drained == 0 {
+		t.Fatal("no drained ops observed; test setup failed to build backlog")
+	}
 }
