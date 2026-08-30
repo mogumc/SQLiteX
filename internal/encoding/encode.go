@@ -1,10 +1,13 @@
 // Package encoding 提供 SQLiteX 的 Key 编解码逻辑。
 //
 // 数据行 Key: [TableID(Uvarint)] + [PrimaryKey(Bytes)]
-// 索引 Key:   [0xFF] + [TableID(Uvarint)] + [FieldNum(byte)] + [FieldValue(Bytes)] + [PK(Bytes)]
+// 索引 Key:   [0xFF] + [TableID(Uvarint)] + [FieldNum(byte)] + [ValueLen(Uvarint)] + [FieldValue(Bytes)] + [PK(Bytes)]
 //
 // 0xFF 前缀将全部索引 Key 置于键空间的末尾，与数据 Key 天然隔离。
-// 同一 TableID 下按 FieldNum → FieldValue → PK 排序，支持索引前缀扫描。
+// 同一 TableID 下按 FieldNum → ValueLen → FieldValue → PK 排序，支持索引前缀扫描。
+// ValueLen 长度前缀保证 FieldValue 与 PK 的边界无歧义：uvarint 是前缀码，
+// 不同 FieldValue 的编码互不为前缀，等值前缀扫描（EncodeIndexPrefix）
+// 不会误命中 "FieldValue 是目标值前缀" 的其他记录。
 package encoding
 
 import "encoding/binary"
@@ -22,50 +25,61 @@ func EncodeKey(tableID uint64, pk []byte) []byte {
 
 // EncodeIndexKey 构造二级索引的物理 Key。
 // fieldNum 是字段在 proto 定义中的编号（1-based）。
-// 格式: [0xFF][TableID Uvarint][FieldNum byte][FieldValue][PK]
+// 格式: [0xFF][TableID Uvarint][FieldNum byte][ValueLen Uvarint][FieldValue][PK]
 func EncodeIndexKey(tableID uint64, fieldNum int32, fieldValue, pk []byte) []byte {
 	var tmp [binary.MaxVarintLen64]byte
 	nTable := binary.PutUvarint(tmp[:], tableID)
-	buf := make([]byte, 1+nTable+1+len(fieldValue)+len(pk))
-	buf[0] = IndexPrefix
-	binary.PutUvarint(buf[1:], tableID)
-	buf[1+nTable] = byte(fieldNum)
-	copy(buf[1+nTable+1:], fieldValue)
-	copy(buf[1+nTable+1+len(fieldValue):], pk)
+	buf := make([]byte, 0, 1+nTable+1+binary.MaxVarintLen64+len(fieldValue)+len(pk))
+	buf = append(buf, IndexPrefix)
+	buf = append(buf, tmp[:nTable]...)
+	buf = append(buf, byte(fieldNum))
+	nVal := binary.PutUvarint(tmp[:], uint64(len(fieldValue)))
+	buf = append(buf, tmp[:nVal]...)
+	buf = append(buf, fieldValue...)
+	buf = append(buf, pk...)
 	return buf
 }
 
 // DecodeIndexKey 从索引 Key 中还原 TableID、字段编号、字段值和主键。
+// ValueLen 长度前缀使 fieldValue 与 pk 的切分无歧义。
+// 返回的切片与 raw 共享底层数组，调用方不得修改。
 func DecodeIndexKey(raw []byte) (tableID uint64, fieldNum int32, fieldValue, pk []byte, err error) {
 	if len(raw) < 3 || raw[0] != IndexPrefix {
 		return 0, 0, nil, nil, ErrMalformedKey
 	}
 	id, n := binary.Uvarint(raw[1:])
-	if n <= 0 {
+	if n <= 0 || 1+n >= len(raw) {
 		return 0, 0, nil, nil, ErrMalformedKey
 	}
-	fieldNum = int32(raw[1+n])
-	fvStart := 1 + n + 1
-	if fvStart >= len(raw) {
+	pos := 1 + n
+	fieldNum = int32(raw[pos])
+	pos++
+	vLen, nVal := binary.Uvarint(raw[pos:])
+	if nVal <= 0 {
 		return 0, 0, nil, nil, ErrMalformedKey
 	}
-	// fieldValue 和 pk 的分割点是"PK在数据 Key 中的位置"——
-	// 但实际上我们不知道 fieldValue 在哪结束。
-	// 对于索引扫描，调用方通常知道 fieldValue 的长度（按类型），
-	// 或者前缀扫描时直接用整个 raw[1+n+1:] 作为 value+pk 拼接即可。
-	// 这里提供完整反解供调试用，实际索引查询不需要拆分 fieldValue 和 pk。
-	return id, fieldNum, raw[fvStart:], nil, nil
+	pos += nVal
+	if uint64(len(raw)-pos) < vLen {
+		return 0, 0, nil, nil, ErrMalformedKey
+	}
+	fieldValue = raw[pos : pos+int(vLen)]
+	pk = raw[pos+int(vLen):]
+	return id, fieldNum, fieldValue, pk, nil
 }
 
 // EncodeIndexPrefix 构造索引前缀（不含 PK 后缀），用于 Pebble 前缀迭代。
+// ValueLen 前缀保证只有 FieldValue 完全相等的索引 Key 才匹配此前缀。
+// 格式: [0xFF][TableID Uvarint][FieldNum byte][ValueLen Uvarint][FieldValue]
 func EncodeIndexPrefix(tableID uint64, fieldNum int32, fieldValue []byte) []byte {
 	var tmp [binary.MaxVarintLen64]byte
 	nTable := binary.PutUvarint(tmp[:], tableID)
-	buf := make([]byte, 1+nTable+1+len(fieldValue))
-	buf[0] = IndexPrefix
-	binary.PutUvarint(buf[1:], tableID)
-	buf[1+nTable] = byte(fieldNum)
-	copy(buf[1+nTable+1:], fieldValue)
+	buf := make([]byte, 0, 1+nTable+1+binary.MaxVarintLen64+len(fieldValue))
+	buf = append(buf, IndexPrefix)
+	buf = append(buf, tmp[:nTable]...)
+	buf = append(buf, byte(fieldNum))
+	nVal := binary.PutUvarint(tmp[:], uint64(len(fieldValue)))
+	buf = append(buf, tmp[:nVal]...)
+	buf = append(buf, fieldValue...)
 	return buf
 }
 
