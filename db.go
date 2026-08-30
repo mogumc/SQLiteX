@@ -339,6 +339,8 @@ func (p *pebblePutter) Delete(key []byte) error {
 // Pebble Batch 是原子的：全成功或全失败。
 func (p *pebblePutter) ApplyBatch(entries []writequeue.BatchEntry) error {
 	batch := p.db.NewBatch()
+	// Pebble 的 Commit 不释放 batch，必须显式 Close，否则泄漏内部分配
+	defer batch.Close()
 	for i := range entries {
 		var err error
 		switch entries[i].Op {
@@ -348,7 +350,6 @@ func (p *pebblePutter) ApplyBatch(entries []writequeue.BatchEntry) error {
 			err = batch.Delete(entries[i].Key, p.writeOpts)
 		}
 		if err != nil {
-			batch.Close()
 			return err
 		}
 	}
