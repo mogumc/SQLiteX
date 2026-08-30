@@ -98,9 +98,14 @@ type Queue struct {
 	batchSize   int    // 组提交批量大小，0=逐条消费
 	maxMem      uint64 // 内存软上限（字节），0=不启用
 	memExceeded atomic.Bool
-	stopped     atomic.Bool
-	wg          sync.WaitGroup
-	memStop     chan struct{} // 通知 memMonitorLoop 立即退出
+	// mu 保护 stopped 与 channel 的关闭时序：
+	// Submit 持 R 锁完成「检查 stopped + 发送」，Stop 持 W 锁完成
+	// 「置位 + 排空 + close」，二者互斥，保证通过检查的发送必然
+	// 先于 close，消除 send on closed channel panic。
+	mu      sync.RWMutex
+	stopped bool
+	wg      sync.WaitGroup
+	memStop chan struct{} // 通知 memMonitorLoop 立即退出
 }
 
 // Config 定义队列参数。
@@ -163,8 +168,14 @@ func (q *Queue) memMonitorLoop() {
 // 队列满时返回 ErrFull，内存超限时返回 ErrMemExceeded，
 // 队列已停止时返回 ErrStopped。
 // 注意：WriteOp 在消费完成后自动通过 ReleaseWriteOp 归还池。
+// mu.RLock 保证「检查 stopped → 发送」的原子性：与 Stop 的
+// close 互斥，不会向已关闭的 channel 发送（panic），
+// 入队成功的 op 也必然被消费循环或 Stop 排空逻辑应答，不会挂死。
 func (q *Queue) Submit(op *WriteOp) error {
-	if q.stopped.Load() {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	if q.stopped {
 		return ErrStopped
 	}
 
@@ -187,12 +198,17 @@ func (q *Queue) Len() int {
 }
 
 // Stop 停止队列消费循环。
-// 先排空缓冲区中已入队的操作（回传错误避免调用方泄漏），
-// 再关闭 channel 并等待消费 Goroutine 退出。
+// 持写锁完成置位、排空与 close：置位后 Submit 无法再入队（其发送
+// 与本函数的 close 互斥），因此排空后关闭 channel 不会与任何发送
+// 竞争。排空时对已入队操作回传 ErrStopped 避免调用方泄漏；
+// 消费循环在 close 后 range 排空剩余缓冲再退出，wg.Wait 等待收尾。
 func (q *Queue) Stop() {
-	if !q.stopped.CompareAndSwap(false, true) {
+	q.mu.Lock()
+	if q.stopped {
+		q.mu.Unlock()
 		return
 	}
+	q.stopped = true
 
 	// 通知 memMonitorLoop 立即退出
 	if q.memStop != nil {
@@ -200,16 +216,18 @@ func (q *Queue) Stop() {
 	}
 
 	// 排空缓冲区中已入队但未消费的操作
+drain:
 	for {
 		select {
 		case op := <-q.queue:
 			op.Done <- ErrStopped
 		default:
-			goto drained
+			break drain
 		}
 	}
-drained:
 	close(q.queue)
+	q.mu.Unlock()
+
 	q.wg.Wait()
 }
 
