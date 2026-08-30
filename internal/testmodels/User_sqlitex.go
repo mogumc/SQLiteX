@@ -4,6 +4,7 @@
 package testmodels
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	zstd "github.com/klauspost/compress/zstd"
@@ -184,6 +185,7 @@ func (m *User) Size() int {
 }
 
 // UserStore 是 User 的强类型存储接口。
+// Create/Update 在唯一索引字段值冲突时返回错误，可用 errors.Is(err, sqlitex.ErrDuplicateKey) 匹配。
 type UserStore interface {
 	Create(m *User) error
 	Update(m *User) error
@@ -202,8 +204,9 @@ func NewUserStore(db *sqlitex.DB) UserStore {
 	return &userStore{db: db, tableID: 1}
 }
 
-// Create 创建新的 User 记录。
+// Create 创建新的 User 记录（主键已存在时为覆盖语义）。
 // 通过 WriteBatch 原子写入主数据行 + 所有二级索引。
+// 唯一索引冲突时返回 errors.Is 可匹配的 sqlitex.ErrDuplicateKey，且不发生任何落盘。
 func (s *userStore) Create(m *User) error {
 	if m == nil {
 		return fmt.Errorf("sqlitex: cannot create nil User")
@@ -213,12 +216,32 @@ func (s *userStore) Create(m *User) error {
 	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
 	value := m.Serialize()
 
-	ops := make([]sqlitex.KVPair, 0, 1+2)
+	ops := make([]sqlitex.KVPair, 0, 1+2*2)
 	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
-	ops = append(ops, sqlitex.KVPair{
-		Key:   encoding.EncodeIndexKey(s.tableID, 3, encodeUserIndexEmailValue(m.Email), pkBytes),
-		Value: pkBytes,
-	})
+
+	// 覆盖创建：读取旧值并清理旧索引条目，防止旧唯一索引条目残留
+	// 导致其他记录的同值写入被误拒。
+	old, _ := s.Get(m.Id)
+	if old != nil {
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeUniqueIndexKey(s.tableID, 3, encodeUserIndexEmailValue(old.Email)),
+			Delete: true,
+		})
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeIndexKey(s.tableID, 4, encodeUserIndexCreatedAtValue(old.CreatedAt), pkBytes),
+			Delete: true,
+		})
+	}
+	// 唯一索引 email 冲突检查：唯一条目的 Value 为持有者 PK，
+	// 等于本记录 PK 视为覆盖自身，放行。检查与提交之间为 check-then-write，
+	// 极端并发窗口下可能双双通过（后写者覆盖唯一条目），见 docs/schema.md。
+	ukeyEmail := encoding.EncodeUniqueIndexKey(s.tableID, 3, encodeUserIndexEmailValue(m.Email))
+	if existing, err := s.db.Get(ukeyEmail); err != nil {
+		return fmt.Errorf("sqlitex: check unique index User.email: %w", err)
+	} else if existing != nil && !bytes.Equal(existing, pkBytes) {
+		return fmt.Errorf("sqlitex: create User: unique index User.email conflict: %w", sqlitex.ErrDuplicateKey)
+	}
+	ops = append(ops, sqlitex.KVPair{Key: ukeyEmail, Value: pkBytes})
 	ops = append(ops, sqlitex.KVPair{
 		Key:   encoding.EncodeIndexKey(s.tableID, 4, encodeUserIndexCreatedAtValue(m.CreatedAt), pkBytes),
 		Value: pkBytes,
@@ -228,6 +251,8 @@ func (s *userStore) Create(m *User) error {
 
 // Update 更新已存在的 User 记录。
 // 先 Get 旧值删除旧索引，再原子写入新数据+新索引。
+// 唯一索引字段值与既有记录冲突时返回 sqlitex.ErrDuplicateKey（自身持有则放行），
+// 此时 WriteBatch 未提交，不发生任何落盘。
 func (s *userStore) Update(m *User) error {
 	if m == nil {
 		return fmt.Errorf("sqlitex: cannot update nil User")
@@ -243,7 +268,7 @@ func (s *userStore) Update(m *User) error {
 	old, _ := s.Get(m.Id)
 	if old != nil {
 		ops = append(ops, sqlitex.KVPair{
-			Key:    encoding.EncodeIndexKey(s.tableID, 3, encodeUserIndexEmailValue(old.Email), pkBytes),
+			Key:    encoding.EncodeUniqueIndexKey(s.tableID, 3, encodeUserIndexEmailValue(old.Email)),
 			Delete: true,
 		})
 		ops = append(ops, sqlitex.KVPair{
@@ -251,8 +276,16 @@ func (s *userStore) Update(m *User) error {
 			Delete: true,
 		})
 	}
+	// 唯一索引 email 冲突检查：唯一条目的 Value 为持有者 PK，
+	// 等于本记录 PK 视为值未变更（自身持有），放行。
+	ukeyEmail := encoding.EncodeUniqueIndexKey(s.tableID, 3, encodeUserIndexEmailValue(m.Email))
+	if existing, err := s.db.Get(ukeyEmail); err != nil {
+		return fmt.Errorf("sqlitex: check unique index User.email: %w", err)
+	} else if existing != nil && !bytes.Equal(existing, pkBytes) {
+		return fmt.Errorf("sqlitex: update User: unique index User.email conflict: %w", sqlitex.ErrDuplicateKey)
+	}
 	ops = append(ops, sqlitex.KVPair{
-		Key:   encoding.EncodeIndexKey(s.tableID, 3, encodeUserIndexEmailValue(m.Email), pkBytes),
+		Key:   encoding.EncodeUniqueIndexKey(s.tableID, 3, encodeUserIndexEmailValue(m.Email)),
 		Value: pkBytes,
 	})
 	ops = append(ops, sqlitex.KVPair{
@@ -275,7 +308,7 @@ func (s *userStore) Delete(Id int64) error {
 	old, _ := s.Get(Id)
 	if old != nil {
 		ops = append(ops, sqlitex.KVPair{
-			Key:    encoding.EncodeIndexKey(s.tableID, 3, encodeUserIndexEmailValue(old.Email), pkBytes),
+			Key:    encoding.EncodeUniqueIndexKey(s.tableID, 3, encodeUserIndexEmailValue(old.Email)),
 			Delete: true,
 		})
 		ops = append(ops, sqlitex.KVPair{
@@ -853,7 +886,7 @@ func NewSessionStore(db *sqlitex.DB) SessionStore {
 	return &sessionStore{db: db, tableID: 2}
 }
 
-// Create 创建新的 Session 记录。
+// Create 创建新的 Session 记录（主键已存在时为覆盖语义）。
 // 通过 WriteBatch 原子写入主数据行 + 所有二级索引。
 // 记录级 TTL: 写入时计算 expiresAt = now + 1000000000ns，过期后惰性删除。
 func (s *sessionStore) Create(m *Session) error {
@@ -865,8 +898,18 @@ func (s *sessionStore) Create(m *Session) error {
 	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
 	value := m.SerializeWithExpiry(time.Now().UnixNano() + 1000000000)
 
-	ops := make([]sqlitex.KVPair, 0, 1+1)
+	ops := make([]sqlitex.KVPair, 0, 1+2*1)
 	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
+
+	// 覆盖创建：读取旧值并清理旧索引条目，防止旧唯一索引条目残留
+	// 导致其他记录的同值写入被误拒。
+	old, _ := s.Get(m.Id)
+	if old != nil {
+		ops = append(ops, sqlitex.KVPair{
+			Key:    encoding.EncodeIndexKey(s.tableID, 3, encodeSessionIndexUserIdValue(old.UserId), pkBytes),
+			Delete: true,
+		})
+	}
 	ops = append(ops, sqlitex.KVPair{
 		Key:   encoding.EncodeIndexKey(s.tableID, 3, encodeSessionIndexUserIdValue(m.UserId), pkBytes),
 		Value: pkBytes,
@@ -884,7 +927,7 @@ func (s *sessionStore) Update(m *Session) error {
 	pkBytes := encodeSessionPrimaryKey(m.Id)
 	dataKey := encoding.EncodeKey(s.tableID, pkBytes)
 	value := m.SerializeWithExpiry(time.Now().UnixNano() + 1000000000)
-	ops := make([]sqlitex.KVPair, 0, 1+1*2)
+	ops := make([]sqlitex.KVPair, 0, 1+2*1)
 	ops = append(ops, sqlitex.KVPair{Key: dataKey, Value: value})
 
 	// 获取旧值，删除旧索引条目
