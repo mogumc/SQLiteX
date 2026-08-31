@@ -7,8 +7,8 @@
 //
 // 物理布局（与生成代码严格一致，详见 encoding/serializer 模板）：
 //
-//	数据 Key: [TableID Uvarint][PK]
-//	索引 Key: [0xFF][TableID Uvarint][FieldNum][FieldValue]
+//	数据 Key: [0x00][TableHash 8B 定宽][PK]
+//	索引 Key: [0xFF][TableHash 8B 定宽][FieldNum][FieldValue]
 //	索引 Value: PK bytes
 //	Value(无TTL): 字段顺序扁平拼接（定长 LE / u32 前缀变长 / 压缩变长）
 //	Value(有TTL): [8B expiresAt UnixNano] + 字段扁平拼接
@@ -32,6 +32,9 @@ import (
 	"github.com/mogumc/sqlitex/internal/codegen"
 	sqlitexpb "github.com/mogumc/sqlitex/proto/sqlitex"
 )
+
+// dataKeyPrefix 与 encoding.DataPrefix 一致（0x00），此处独立声明避免 internal 依赖扩散。
+const dataKeyPrefix = 0x00
 
 // indexKeyPrefix 与 encoding.IndexPrefix 一致（0xFF），此处独立声明避免 internal 依赖扩散。
 const indexKeyPrefix = 0xFF
@@ -211,28 +214,22 @@ func (s *schemaStore) table(id uint64) *tableSchema {
 	return s.tables[id]
 }
 
-// tableOf 从物理 Key 提取 TableID 并查表；非数据键或未知表返回 nil。
+// tableOf 从物理 Key 提取 TableHash 并查表；非数据键或未知表返回 nil。
 func (s *schemaStore) tableOf(raw []byte) *tableSchema {
-	if len(raw) == 0 || raw[0] == indexKeyPrefix {
+	if len(raw) < 9 || raw[0] != dataKeyPrefix {
 		return nil
 	}
-	id, n := binary.Uvarint(raw)
-	if n <= 0 {
-		return nil
-	}
-	return s.table(id)
+	tableHash := binary.BigEndian.Uint64(raw[1:9])
+	return s.table(tableHash)
 }
 
-// tableOfIndex 从索引键提取 TableID 并查表；非索引键或未知表返回 nil。
+// tableOfIndex 从索引键提取 TableHash 并查表；非索引键或未知表返回 nil。
 func (s *schemaStore) tableOfIndex(raw []byte) *tableSchema {
-	if len(raw) == 0 || raw[0] != indexKeyPrefix {
+	if len(raw) < 9 || raw[0] != indexKeyPrefix {
 		return nil
 	}
-	id, n := binary.Uvarint(raw[1:])
-	if n <= 0 {
-		return nil
-	}
-	return s.table(id)
+	tableHash := binary.BigEndian.Uint64(raw[1:9])
+	return s.table(tableHash)
 }
 
 // ---- Key 解码 ----
@@ -247,26 +244,26 @@ type decodedKey struct {
 }
 
 // decodeKey 按当前 schema 解码物理 Key。
-// 无法识别（未导入 schema / 未知 TableID / 非法编码）时 Kind=unknown。
+// 无法识别（未导入 schema / 未知 TableHash / 非法编码）时 Kind=unknown。
 func (s *schemaStore) decodeKey(raw []byte) decodedKey {
 	d := decodedKey{Kind: "unknown"}
-	if len(raw) == 0 {
+	if len(raw) < 9 {
 		return d
 	}
 	if raw[0] == indexKeyPrefix {
 		d.Kind = "index"
-		tableID, n := binary.Uvarint(raw[1:])
-		if n <= 0 || 1+n >= len(raw) {
-			d.Kind = "unknown"
-			return d
-		}
-		ts := s.table(tableID)
+		tableHash := binary.BigEndian.Uint64(raw[1:9])
+		ts := s.table(tableHash)
 		if ts == nil {
 			return d // index 类型已知但表未知
 		}
 		d.Table = ts.Message
-		fieldNum := int32(raw[1+n])
-		rest := raw[2+n:]
+		if len(raw) < 10 {
+			d.Kind = "unknown"
+			return d
+		}
+		fieldNum := int32(raw[9])
+		rest := raw[10:]
 		// 索引键布局 [ValueLen Uvarint][FieldValue][PK]：
 		// 长度前缀切出无歧义的 FieldValue/PK 边界（与 encoding.EncodeIndexKey 一致）。
 		vLen, nVal := binary.Uvarint(rest)
@@ -284,17 +281,17 @@ func (s *schemaStore) decodeKey(raw []byte) decodedKey {
 		return d
 	}
 
-	tableID, n := binary.Uvarint(raw)
-	if n <= 0 {
+	if raw[0] != dataKeyPrefix {
 		return d
 	}
-	ts := s.table(tableID)
+	tableHash := binary.BigEndian.Uint64(raw[1:9])
+	ts := s.table(tableHash)
 	if ts == nil {
 		return d
 	}
 	d.Kind = "data"
 	d.Table = ts.Message
-	d.PK = decodePK(ts, raw[n:])
+	d.PK = decodePK(ts, raw[9:])
 	return d
 }
 
@@ -324,13 +321,12 @@ func comparePK(ts *tableSchema, a, b []byte) int {
 	return bytes.Compare(pa, pb)
 }
 
-// pkBytesOf 从数据 Key 中剥离 [TableID Uvarint] 前缀，返回 PK bytes。
+// pkBytesOf 从数据 Key 中剥离 [0x00][TableHash 8B] 前缀，返回 PK bytes。
 func pkBytesOf(ts *tableSchema, raw []byte) []byte {
-	_, n := binary.Uvarint(raw)
-	if n <= 0 || n >= len(raw) {
+	if len(raw) < 9 || raw[0] != dataKeyPrefix {
 		return nil
 	}
-	return raw[n:]
+	return raw[9:]
 }
 
 func cmpInt64(a, b int64) int {
@@ -580,9 +576,11 @@ func utf8Clean(b []byte) bool {
 	return true
 }
 
-// dataKeyPrefix 构造某表数据 Key 的物理前缀（用于表级过滤扫描）。
-func dataKeyPrefix(tableID uint64) []byte {
-	buf := make([]byte, binary.MaxVarintLen64)
-	n := binary.PutUvarint(buf, tableID)
-	return buf[:n]
+// encodeDataKeyPrefix 构造某表数据 Key 的物理前缀（用于表级过滤扫描）。
+// 格式: [0x00][TableHash 8B 定宽]
+func encodeDataKeyPrefix(tableHash uint64) []byte {
+	buf := make([]byte, 9)
+	buf[0] = dataKeyPrefix
+	binary.BigEndian.PutUint64(buf[1:9], tableHash)
+	return buf
 }

@@ -30,8 +30,8 @@ message Session {
 }
 `
 
-// TestImportProtoAndTableIDs 验证解析出的表结构与 TableID 编号
-// （与 protoc 编译路径同源，编号必须一致）。
+// TestImportProtoAndTableIDs 验证解析出的表结构与 TableHash 稳定性
+// （与 protoc 编译路径同源，哈希必须一致）。
 func TestImportProtoAndTableIDs(t *testing.T) {
 	s := newSchemaStore()
 	if err := s.importProto("test.proto", demoSchemaText); err != nil {
@@ -41,11 +41,14 @@ func TestImportProtoAndTableIDs(t *testing.T) {
 	if len(tables) != 2 {
 		t.Fatalf("want 2 tables, got %d", len(tables))
 	}
-	if tables[0].TableID != 1 || tables[0].Message != "User" {
-		t.Errorf("table[0] = %s#%d, want User#1", tables[0].Message, tables[0].TableID)
+	// TableID 现在是消息全名的 FNV-1a 64 位哈希，不再是顺序编号
+	// test.User -> fnv1a64("test.User") = 10771054291938890206
+	// test.Session -> fnv1a64("test.Session") = 16788397375209213395
+	if tables[0].Message != "User" {
+		t.Errorf("table[0].Message = %s, want User", tables[0].Message)
 	}
-	if tables[1].TableID != 2 || !tables[1].HasTTL {
-		t.Errorf("table[1] = %s#%d hasTTL=%v, want Session#2 hasTTL=true", tables[1].Message, tables[1].TableID, tables[1].HasTTL)
+	if tables[1].Message != "Session" || !tables[1].HasTTL {
+		t.Errorf("table[1] = %s hasTTL=%v, want Session hasTTL=true", tables[1].Message, tables[1].HasTTL)
 	}
 
 	// 索引/压缩/TTL 选项提取
@@ -73,19 +76,35 @@ func TestDecodeKeyDataAndIndex(t *testing.T) {
 		t.Fatalf("importProto: %v", err)
 	}
 
-	// 数据键: [1][PK int64 LE]
+	// 获取 User 表的 TableHash
+	_, tables := s.snapshot()
+	userTable := tables[0] // User
+	if userTable.Message != "User" {
+		t.Fatalf("first table is not User: %s", userTable.Message)
+	}
+	userTableHash := userTable.TableID
+
+	// 数据键: [0x00][TableHash 8B 定宽][PK int64 LE]
 	pk := make([]byte, 8)
 	binary.LittleEndian.PutUint64(pk, 42)
-	dataKey := append([]byte{1}, pk...)
+	dataKey := make([]byte, 1+8+8)
+	dataKey[0] = 0x00 // DataPrefix
+	binary.BigEndian.PutUint64(dataKey[1:9], userTableHash)
+	copy(dataKey[9:], pk)
 	d := s.decodeKey(dataKey)
 	if d.Kind != "data" || d.Table != "User" || d.PK != int64(42) {
 		t.Errorf("data decode = %+v, want User/42", d)
 	}
 
-	// 索引键: [0xFF][1][fieldNum=3][ValueLen][email][PK]
+	// 索引键: [0xFF][TableHash 8B 定宽][fieldNum=3][ValueLen][email][PK]
 	// ValueLen 为 email 长度的 Uvarint（与 encoding.EncodeIndexKey 布局一致）。
 	email := []byte("a@b.com")
-	idxKey := []byte{0xFF, 1, 3, byte(len(email))}
+	var tmp [8]byte
+	binary.BigEndian.PutUint64(tmp[:], userTableHash)
+	idxKey := []byte{0xFF}
+	idxKey = append(idxKey, tmp[:]...)
+	idxKey = append(idxKey, 3) // fieldNum
+	idxKey = append(idxKey, byte(len(email)))
 	idxKey = append(idxKey, email...)
 	idxKey = append(idxKey, pk...)
 	d = s.decodeKey(idxKey)
@@ -93,8 +112,8 @@ func TestDecodeKeyDataAndIndex(t *testing.T) {
 		t.Errorf("index decode = %+v, want User/email/a@b.com", d)
 	}
 
-	// 未知表
-	d = s.decodeKey([]byte{9, 1, 2, 3})
+	// 未知表（错误的 tag 字节）
+	d = s.decodeKey([]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09})
 	if d.Kind != "unknown" {
 		t.Errorf("unknown table decode = %+v, want kind=unknown", d)
 	}
@@ -106,7 +125,11 @@ func TestDecodeValueFields(t *testing.T) {
 	if err := s.importProto("test.proto", demoSchemaText); err != nil {
 		t.Fatalf("importProto: %v", err)
 	}
-	ts := s.table(1)
+	_, tables := s.snapshot()
+	ts := tables[0] // User
+	if ts.Message != "User" {
+		t.Fatalf("first table is not User: %s", ts.Message)
+	}
 
 	// 手工构造 User value: id(8) + [len]name + [len]email + created_at(8) + active(1) + [len][len]bio
 	buf := make([]byte, 0, 64)

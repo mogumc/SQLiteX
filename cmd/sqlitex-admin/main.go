@@ -232,7 +232,7 @@ func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tableID = id
-		prefix = string(dataKeyPrefix(tableID))
+		prefix = string(encodeDataKeyPrefix(tableID))
 	}
 
 	// 表视图默认按主键排序：物理 Key 中 int 主键是小端编码，
@@ -256,7 +256,7 @@ const maxTableScan = 10000
 // 仅对当前页做点查取值与字段解码，避免全表 value 常驻内存。
 // 游标语义：排序模式下 cursor 为页偏移（十进制字符串）。
 func (s *adminServer) handleTableKeysSorted(w http.ResponseWriter, r *http.Request, ts *tableSchema, limit int, decode bool) {
-	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: dataKeyPrefix(ts.TableID)})
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: encodeDataKeyPrefix(ts.TableID)})
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
@@ -264,7 +264,7 @@ func (s *adminServer) handleTableKeysSorted(w http.ResponseWriter, r *http.Reque
 	defer iter.Close()
 
 	var keys [][]byte
-	prefix := dataKeyPrefix(ts.TableID)
+	prefix := encodeDataKeyPrefix(ts.TableID)
 	for iter.SeekGE(prefix); iter.Valid(); iter.Next() {
 		k := iter.Key()
 		if !strings.HasPrefix(string(k), string(prefix)) {
