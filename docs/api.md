@@ -32,6 +32,7 @@ func (db *DB) Delete(key []byte) error          // 删除
 
 - `Get` 未命中返回 `nil` **而非错误**——调用方用 `value == nil` 判断不存在。
 - `Put` 走 MPSC 写队列异步落盘，高吞吐；`PutSync` 直写并 fsync，强持久性。
+- **缓存一致性（修复）**：`Get` 未命中时（含 TTL 惰性删除触发的物理删除）会同步逐出 TinyLFU 中该 key 的残留条目。此前"写后失效"与"读后回填"存在 TOCTOU 交错——一个并发读可能把删除前取到的旧值重新回填进缓存，使陈旧值在 TTL 窗口内继续被返回。现在删除路径与未命中路径都会主动失效缓存。
 
 ### 3. 批量原子写
 
@@ -116,7 +117,7 @@ func (db *DB) BackupTo(destDir string) error   // Checkpoint + 目录 fsync 的�
 | `AsyncWAL`           | bool          | false | 异步 WAL（NoSync），崩溃可能丢最近数据                |
 | `WALBytesPerSync`    | int           | 0     | 异步 WAL 后台 sync 字节间隔，推荐 1MB                 |
 | `WALMinSyncInterval` | time.Duration | 0     | 异步 WAL 两次 sync 最小间隔，合并写减少 IOPS          |
-| `BatchCommitSize`    | int           | 0     | 组提交批量大小，0=逐条（NoSync 下批量反而更差）       |
+| `BatchCommitSize`    | int           | 0     | 组提交批量大小，**0=逐条（默认，推荐保持）**。攒批等待会引入尾部延迟，仅高吞吐批量写（数据导入、写放大明显）值得开启，推荐 32-128 |
 | `CacheMaxMB`         | int           | 10    | TinyLFU 热点读缓存上限，-1 禁用                       |
 | `Metrics`            | bool          | false | 启用内建 Prometheus 指标（默认零开销）                |
 | `MetricsNamespace`   | string        | sqlitex | 指标名前缀，多实例区分                               |
@@ -129,14 +130,14 @@ func (db *DB) BackupTo(destDir string) error   // Checkpoint + 目录 fsync 的�
 
 ```go
 var (
-    ErrDBClosed        // 数据库已关闭
-    ErrInvalidKey      // key 为空
-    ErrWriteThrottled  // 队列满或内存超限（背压）
-    ErrQueueFull       // 内部，对外转为 ErrWriteThrottled
-    ErrMemoryExceeded  // 内存超限
-    ErrDuplicateKey    // 唯一索引冲突（Create/Update 被拒，未落盘）
+    ErrDBClosed       // 数据库已关闭
+    ErrInvalidKey     // key 为空
+    ErrWriteThrottled // 队列满或内存超限（背压）
+    ErrDuplicateKey   // 唯一索引冲突（Create/Update 被拒，未落盘）
 )
 ```
+
+> ⚠️ **变更**：`ErrQueueFull` 与 `ErrMemoryExceeded` 已从公共 API 移除（死代码清理）。二者自引入起从未对外返回——写队列满与内存超限统一返回 `ErrWriteThrottled`，`errors.Is` 匹配逻辑不受影响。引用了这两个符号的代码需删除引用。
 
 示例：
 
@@ -178,6 +179,8 @@ func NewMockUserStore() *mockUserStore  // 内存 Mock，单元测试用
 | `Delete`       | 原子删数据行 + 索引行                                                  |
 | `Get`          | 主键查询，未命中返回`(nil, nil)`；TTL 表过期自动惰性删除返回 `nil` |
 | `PurgeExpired` | 遍历全表删过期记录 + 索引，返回条数（TTL 表）                          |
+
+> ⚠️ **单写者约束**：`Update`/`Delete` 是**读-改-写**（先 `Get` 旧值算出索引差量，再 `WriteBatch` 提交）。单次 `WriteBatch` 提交是原子的，但"读旧值 → 提交"整段不是。**多个 goroutine 并发写同一条记录会产生孤儿索引**——旧索引条目残留，指向已经不存在的旧字段值。当前版本要求**同一主键由单一写者串行写入**；多写者场景需业务层自行串行化（按主键分片加锁，或写路径收敛到单个 goroutine）。内建多写者支持（乐观锁 / 事务）属后续演进项。
 
 ### 2. 序列化
 
@@ -224,22 +227,32 @@ count, err  := q.Count()   // int
 ### 4. 编码层（`internal/encoding`）
 
 ```go
-func EncodeKey(tableID uint64, pk []byte) []byte
-func EncodeIndexKey(tableID uint64, fieldNum int32, fieldValue, pk []byte) []byte
-func EncodeIndexPrefix(tableID uint64, fieldNum int32, fieldValue []byte) []byte
-func DecodeKey(raw []byte) (tableID uint64, pk []byte, err error)
-func DecodeIndexKey(raw []byte) (tableID uint64, fieldNum int32, fieldValue, pk []byte, err error)
+func EncodeKey(tableHash uint64, pk []byte) []byte
+func EncodeIndexKey(tableHash uint64, fieldNum int32, fieldValue, pk []byte) []byte
+func EncodeIndexPrefix(tableHash uint64, fieldNum int32, fieldValue []byte) []byte
+func DecodeKey(raw []byte) (tableHash uint64, pk []byte, err error)
+func DecodeIndexKey(raw []byte) (tableHash uint64, fieldNum int32, fieldValue, pk []byte, err error)
 ```
 
 Key 布局：
 
 ```
-数据行:   [TableID Uvarint][PrimaryKey]
-索引行:   [0xFF][TableID Uvarint][FieldNum Varint][ValueLen Uvarint][FieldValue][PrimaryKey]
-唯一索引: [0xFF][TableID Uvarint][FieldNum Varint][ValueLen Uvarint][FieldValue]（无 PK 后缀，PK 存于 Value）
+数据行:   [0x00][TableHash 8B 大端][PrimaryKey]
+索引行:   [0xFF][TableHash 8B 大端][FieldNum 1B][ValueLen Uvarint][FieldValue][PrimaryKey]
+唯一索引: [0xFF][TableHash 8B 大端][FieldNum 1B][ValueLen Uvarint][FieldValue]（无 PK 后缀，PK 存于 Value）
 ```
 
-`0xFF` 前缀使索引行与数据行隔离，避免键冲突。`ValueLen` 长度前缀保证 FieldValue
+**TableHash 是消息全名（`go_package + "." + MessageName`）的 FNV-1a 64 位哈希**，由 codegen 在生成期算定并硬编码进生成代码（生成期做碰撞校验，冲突直接报 error 而非静默错位）。要点：
+
+- **演进稳定性**：哈希只取决于包名与 Message 名。在 proto 中新增表、删除表、调整 Message 声明顺序，都不会改变既有表算出的哈希——物理 Key 前缀不漂移，历史数据不会被路由到错误的表。此前 TableID 按 Message 遍历顺序递增分配，增删或重排任何一张表都会平移后续全部表的 ID，导致**数据静默错位且无报错**。
+- **跨包隔离**：不同包下的同名 Message（如 `a.User` 与 `b.User`）哈希不同，天然不冲突。
+- **存储代价**：8B 定宽哈希取代 1-2B Uvarint 顺序 ID，每键 +7 字节（128B Value 场景约 +5.2% 空间），读效率实测影响 <±1%。
+
+**0x00 / 0xFF 双 tag 隔离**：数据行首字节固定 `0x00`，索引行首字节固定 `0xFF`，两个命名空间彻底分离。此前仅索引行带 `0xFF`、数据行无 tag，当 TableID 的 Uvarint 编码恰好以 `0xFF` 开头时（如 ID=127 编码为 `FF 01`），数据键会撞进索引键空间。
+
+> ⚠️ **破坏性变更（无自动迁移）**：键格式由 `[TableID Uvarint][PK]` 改为 `[0x00][TableHash 8B][PK]`，索引键同步改为 8B 定宽哈希。**按旧格式写入的数据无法被新代码读取**——旧数据行缺少 `0x00` tag 会被判为非法 Key，旧索引行的哈希位与原顺序 ID 长度不同会整段错位。升级步骤：① 用旧版本代码全量导出数据；② 用 `protoc` 重新生成全部 `*_sqlitex.go`（旧生成代码里硬编码的是顺序 TableID，必须重新生成）；③ 用新代码重新灌入。跨过这次升级后，后续增删表不再需要迁移。
+
+`ValueLen` 长度前缀保证 FieldValue
 与 PrimaryKey 的边界无歧义：等值索引扫描只命中字段值完全相等的记录，不会误命中
 "字段值是目标值前缀" 的其他记录。唯一索引行不携带 PK 后缀，同一字段值在键空间中
 至多存在一个条目，Create/Update 据此以一次 O(1) Get 检查冲突，冲突返回
@@ -250,5 +263,6 @@ Key 布局：
 ## 五、线程安全
 
 - 核心包 `DB` **并发安全**：多 goroutine 可同时 Put/Get/Delete/Iterate。
+- **`Close` 与读写并发安全**：`DB` 内部持 `sync.RWMutex`，`Close` 取写锁，各读写路径取读锁。此前 `Close` 与读路径是 check-then-act 竞态——读操作检查完 `closed` 标志后 Pebble 仍可能被并发 `Close` 掉，触发 use-of-closed-DB panic。现在 `Close` 会等待在途读写退出；重复 `Close` 返回 `ErrDBClosed`；`Close` 之后的读写一律返回 `ErrDBClosed`。
 - 生成代码 Store/Query **非线程安全**（无内部锁）：同一 Store 实例并发使用需外部加锁；多 goroutine 各自 `NewXxxStore`/`NewXxxQuery` 则安全。
 - Mock Store 内部有锁，线程安全。

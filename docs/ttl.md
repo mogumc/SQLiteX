@@ -36,9 +36,9 @@ Value: [8B expiresAt UnixNano][payload ...]
 
 ```
 过期检测 (Get / Query):
-  → deleteXWithIndexes(db, tableID, dataKey, m)
-       ├─ 数据行: [TableID][PK] Delete
-       ├─ 索引行: [0xFF][TableID][FieldNum][ValueLen][Value][PK] Delete × N
+  → deleteXWithIndexes(db, tableHash, dataKey, m)
+       ├─ 数据行: [0x00][TableHash 8B][PK] Delete
+       ├─ 索引行: [0xFF][TableHash 8B][FieldNum][ValueLen][Value][PK] Delete × N
        └─ 单次 WriteBatch 原子提交
 ```
 

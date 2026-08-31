@@ -72,7 +72,7 @@ go build -o sqlitex-admin ./cmd/sqlitex-admin
 
 面板右上角「导入 Schema (.proto)」上传业务 proto 文件（或启动时 `-proto` 自动导入）后：
 
-- **表结构视图**：按 proto 解析出每张表的 TableID、主键、字段类型、二级索引（unique/normal）、压缩标记与 TTL——与 `protoc-gen-sqlitex` 代码生成走同一条 IR 提取路径，编号与语义严格一致；
+- **表结构视图**：按 proto 解析出每张表的 **TableHash**（= 消息全名 `go_package + "." + MessageName` 的 FNV-1a 64 位哈希，与生成代码里硬编码的值同源）、主键、字段类型、二级索引（unique/normal）、压缩标记与 TTL——与 `protoc-gen-sqlitex` 代码生成走同一条 IR 提取路径，语义严格一致。面板按哈希匹配物理 Key 前缀，因此**必须导入与写入数据时同一套 proto**：包名或 Message 名变更会改变哈希，该表将全部解码为 `unknown`；
 - **Key 语义化**：原始字节 Key 解码为 `表名 + 主键值`（数据行）或 `表名 + 索引字段 = 值`（索引键），表选择器按表过滤扫描；
 - **标准表格视图**：选中具体表后，数据以数据库表格形式展示——列 = 主键 + proto 字段（含类型标注，TTL 表附过期时间/存活状态列），行 = 字段级解码值（zstd 压缩字段自动还原），点击行查看完整详情与原始十六进制兜底；「全库（原始 key）」模式保留原始字节浏览；
 - **Value 字段级解码**：扁平 Value 按字段类型逐个还原（定长标量 / 变长字符串 / zstd 压缩字段自动解压），TTL 表显示过期时间与存活状态；解码失败的字段保留原始十六进制兜底。
@@ -94,7 +94,7 @@ go build -o sqlitex-admin ./cmd/sqlitex-admin
 | P1 | 查询过滤 | 按字段条件过滤（等值/范围/LIKE），复用生成的二级索引 |
 | P2 | 表删改 | 行级新增/编辑/删除（需显式开启写模式，解除只读保护 + 审计日志） |
 | P3 | protobuf 生成 | 面板内编写 .proto、调用 protoc-gen-sqlitex 预览生成产物 |
-| P4 | protobuf 修改 | Schema 编辑、版本对比与兼容性检查（TableID/字段编号变更检测） |
+| P4 | protobuf 修改 | Schema 编辑、版本对比与兼容性检查（**字段编号**变更检测；TableHash 由消息全名决定，增删表/调整声明顺序不会导致数据错位，但**重命名 Message 或改 `go_package` 会改变哈希**，属破坏性变更 → 需数据迁移） |
 | P5 | 导入导出 | CSV/JSON 数据导入导出 |
 
 写能力（P2+）落地时同步解决：翻页快照一致性（Pebble 快照迭代器）、操作审计、危险操作二次确认。
@@ -138,3 +138,4 @@ SQLiteX 的持久性由 Pebble WAL 保证，已在测试中覆盖三类故障场
 | 读延迟抬升 | `sqlitex_cache_requests_total` 命中率；热点 key 是否超过 `CacheMaxMB` 容量 |
 | 内存上涨 | `sqlitex_go_heap_bytes` 与 `MaxMemMB` 水位；大 Value 是否绕过缓存豁免 |
 | 磁盘增长 | TTL 表未调用 `PurgeExpired`；Compaction 跟不上写入速度 |
+| 表视图为空 / Key 显示为 `unknown` | 导入的 proto 与写入数据时的 proto 不一致（包名或 Message 名变更 → TableHash 变化）；确认 proto 版本后重新导入 |

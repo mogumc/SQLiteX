@@ -16,7 +16,7 @@
 
 **关键调优结论**：
 
-1. **NoSync 下组提交是负优化**：`BatchCommitSize=64` 会掉到 701K QPS，故默认 `BatchCommitSize=0`（逐条）。
+1. **NoSync 下组提交是负优化**：`BatchCommitSize=64` 会掉到 701K QPS，故默认 `BatchCommitSize=0`（逐条）。**评估结论：保持默认关闭**——攒批等待会引入不确定的尾部延迟，只有批量导入、写放大明显等高吞吐写场景才值得开启（推荐 32-128）；延迟敏感型应用开启是净损失。
 2. **高并发有 Pebble 内部互斥限制**：Direct Pebble NoSync 在 16 并发退化到 284K QPS，SQLiteX 的 MPSC 队列能维持稳定高吞吐。
 3. **DirectWrite 方案已废弃**：Pebble 在 16+ 并发 WAL 轮转时 `closed LogWriter` 崩溃，不再采用。
 
@@ -79,6 +79,22 @@ go test -bench . -run=^$ ./internal/testmodels/
 - BlockCache 按热点数据量调整，通常 32MB 起步。
 
 **MaxMemMB（进程堆水位背压）**：默认 `0 = 不限制`。注意 `MaxQueueLen` 只限制在途写入的**条数**（默认 1024）而非单条大小——小 KV 场景在途内存可忽略，默认关闭没有实际风险；但存储 **MB 级长文本/大二进制**（本项目核心场景）时，突发写入可在写队列中堆积最多 1024 × N MB 的在途数据，堆内存无上限增长直至 OOM。此类负载建议开启 `MaxMemMB`（约为进程可用内存的 70-80%），超限时新写入返回 `ErrWriteThrottled` 背压而非崩溃。它是 250ms 采样窗口的软限；同进程多实例共享同一进程堆，阈值需按进程总量规划。
+
+> **评估结论（保持默认关闭）**：Go GC 已提供内存回收兜底，背压是应对"写入速率 > GC 回收速率"的防御性机制；且 250ms 采样窗口在阈值附近会出现允许/拒绝抖动，影响可预测性。`MaxQueueLen=1024` 已限制在途条数，默认零开销（0 分支）关闭，需要时按上述建议自行调优。
+
+**TinyLFU 与 BlockCache 的分工（保留 TinyLFU 的决策记录）**
+
+两者都缓存读路径数据、确有职责重叠，但粒度与内存模型不同，长期共存：
+
+| | Pebble Block Cache | TinyLFU 热点缓存 |
+|---|---|---|
+| 缓存对象 | SSTable **数据块**（block） | **完整记录**（value bytes） |
+| 内存模式 | 预占用固定额度（`BlockCacheSize`，默认 8MB） | 弹性水位：按 `len(key)+len(value)+overhead` 精确记账 + LRU 驱逐，低负载自动收缩 |
+| 命中收益 | 省一次磁盘 IO，仍需 block 内查找、校验、value 拷贝 | 省掉整条 Pebble 读路径，直接返回记录副本 |
+| 抗污染 | 无 | Count-Min Sketch 准入（阈值 2），免疫全表扫描与恶意请求 |
+| 默认额度 | 8MB | 10MB（`CacheMaxMB`，`-1` 可禁用） |
+
+即 block cache 缓存的是"存储层的数据块"，TinyLFU 缓存的是"引擎层的完整记录"。TinyLFU 在低水位下的平均占用远低于上限，对内存敏感的嵌入式/边缘场景更友好——这是它无法被 block cache 取代的主因。不需要时 `CacheMaxMB=-1` 完全禁用。
 
 ## 6. 写路径剖析
 

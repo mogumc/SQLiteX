@@ -72,7 +72,7 @@ message Order {
 
 `INDEX_UNIQUE` 由生成的 Store 在 **Create/Update 时强制**：
 
-- 物理布局：唯一索引行不携带 PK 后缀（`[0xFF][TableID][FieldNum][ValueLen][FieldValue]`），PK 存于行 Value 中。同一字段值在键空间中至多存在一个条目。
+- 物理布局：唯一索引行不携带 PK 后缀（`[0xFF][TableHash 8B][FieldNum 1B][ValueLen][FieldValue]`），PK 存于行 Value 中。同一字段值在键空间中至多存在一个条目。
 - 冲突检查：Create/Update 提交前对每个唯一字段做一次 O(1) `Get`；值已被其他记录持有时返回 `ErrDuplicateKey`（`errors.Is` 匹配），**写入不落盘**。值由自身持有（值未变更的 Update、同主键覆盖 Create）时放行。
 - 覆盖创建：同主键重复 `Create` 为覆盖语义，旧记录的全部索引条目（含唯一）会被清理，旧值立即释放给其他记录使用。
 - 已知限制：冲突检查与 WriteBatch 提交之间为 check-then-write，**极端并发窗口下**（多 goroutine 同时创建同值记录）可能双双通过，最终唯一条目由后写者持有（前一记录数据行仍在，但不再被唯一索引指向）。进程内强一致需要写路径串行化，属后续演进项；单写者或低并发场景不受影响。
@@ -96,11 +96,13 @@ TTL 时间字符串支持 Go `time.ParseDuration` 格式：`"30s"`、`"5m"`、`"
 
 ## 4. 支持的主键类型
 
-| 类型 | 编码方式 | 排序 |
-|------|---------|------|
-| `int64` | 变长 Uvarint | 数值序 |
-| `uint64` | 变长 Uvarint | 数值序 |
+| 类型 | 编码方式 | 物理字节序 |
+|------|---------|-----------|
+| `int64` | 定长 8 字节小端（`binary.LittleEndian.PutUint64`） | **字节序 ≠ 数值序** |
+| `uint64` | 定长 8 字节小端 | **字节序 ≠ 数值序** |
 | `string` | 原始字节 | 字典序 |
+
+> ⚠️ 数值主键在物理 Key 上按**字节序**排列，不等于数值大小顺序（`pk=256` 的字节 `00 01 …` 排在 `pk=1` 的 `01 00 …` 之前）。全表扫描与范围迭代的顺序即字节序；需要数值序展示时用 `sqlitex-admin` 表视图（后端已按主键类型重排）或业务层自行排序。
 
 ## 5. 字段类型映射
 
@@ -113,6 +115,19 @@ TTL 时间字符串支持 Go `time.ParseDuration` 格式：`"30s"`、`"5m"`、`"
 | `bytes` | `[]byte` | ✅ | ✅ | - |
 | `bool` | `bool` | ✅ | - | - |
 | `float`/`double` | `float64` | ⚠️ 退化 | - | - |
+| `enum` | `int32` | ✅ | - | - |
+
+### 不支持的字段形态
+
+以下形态在 IR 层（`buildTableIR`）即被拒绝，codegen 直接返回错误，**不会生成无法编译的代码**：
+
+| 形态 | 报错 | 替代方案 |
+|------|------|----------|
+| `repeated` 字段 | `field X: repeated fields are not supported in Phase 1` | ① 拆成独立子表 + 外键字段关联；② 用 `string` 存分隔符拼接的列表；③ 用 `bytes` 自行序列化 |
+| `map<K,V>` | `unsupported proto type: TYPE_MESSAGE`（map 底层是 message 条目） | 同 `repeated` |
+| 嵌套 `message` 字段 | `unsupported proto type: TYPE_MESSAGE` | 展平为标量字段，或拆子表 |
+
+> 纯数值表（无任何 `string`/`bytes` 字段，如计数器、积分表）**完全支持**：query 模板按是否存在字符串字段决定是否导入 `strings`，serializer 模板按是否存在变长字段决定是否声明 `vLen`，不会再出现 `"strings" imported and not used` / `declared and not used: vLen` 编译错误。
 
 ## 6. 生成产物
 
@@ -151,4 +166,6 @@ protoc \
 | `primary_key not found` | TableOption 声明的字段不存在 | 检查拼写 |
 | 主键类型不支持 | 主键是 `bool`/`int32` 等 | 改用 `int64`/`uint64`/`string` |
 | 索引未生效 | 查询走全表扫描 | 确认字段声明了 `index` 且 Query 用了 `WhereXxx` |
+| `repeated fields are not supported` | 字段声明为 `repeated` | 拆子表，或用 `string`/`bytes` 自行编码（见「不支持的字段形态」） |
+| `unsupported proto type` | 字段是嵌套 message 或 `map` | 展平为标量字段或拆子表 |
 | Mock 无 TTL 语义 | Mock 不模拟过期 | 测试 TTL 业务逻辑用真实 `sqlitex.DB` |

@@ -28,7 +28,7 @@ AST 解析与生成： 开发自定义的 Go 插件 protoc-gen-sqlitex。通过�
 _核心机制： 复用工业级 LSM-Tree 引擎，聚焦上层数据结构与资源优化。_
 
 底层引擎选型： 采用 Pebble (BSD-3-Clause) 作为底层存储基座。直接利用其运行后生成的原生目录结构（包含 WAL、SSTable 等），不做强行单文件打包，以获取最佳的稳定性、空间控制与工程优雅性。  
-命名空间路由 (Prefix Encoding)： 采用字典序前缀编码区分不同表（Message）的数据。Key 结构设计为 [TableID (Uvarint)] + [PrimaryKey (Bytes)]，保证局部扫描的缓存命中率与逻辑隔离。  
+命名空间路由 (Prefix Encoding)： 采用字典序前缀编码区分不同表（Message）的数据。数据行 Key 为 `[0x00] + [TableHash 8B] + [PrimaryKey]`，索引行 Key 为 `[0xFF] + [TableHash 8B] + [FieldNum] + [ValueLen] + [FieldValue] + [PrimaryKey]`。其中 **TableHash 是消息全名（`go_package + "." + MessageName`）的 FNV-1a 64 位哈希**——只取决于包名与 Message 名，在 proto 中增删表、调整 Message 声明顺序都不会让既有表的哈希漂移，历史数据不会被静默路由到错误的表；codegen 在生成期做碰撞校验，冲突直接报错。`0x00` / `0xFF` 双 tag 让数据键空间与索引键空间彻底隔离，保证局部扫描的缓存命中率与逻辑隔离。  
 Value 结构设计 (Meta + Payload)： 有 TTL 的表在 Value 头部携带 8 字节过期时间戳（Meta Header），其后为按字段顺序扁平拼接的 Payload（定长小端编码 / u32 前缀变长 / 压缩变长）。读取时按偏移直接定位字段，压缩字段按需解压，避免全量解压的 CPU 浪费。  
 
 ### 内存热缓存 (Hot Cache)
@@ -58,7 +58,7 @@ TTL 惰性删除 (Lazy Deletion)： 支持在 Protobuf 中声明 TTL，读取时
 _核心机制： 编译时自动维护索引，强制 O(1) 游标寻址，消灭深分页性能灾难。_
 
 自动化二级索引： 在 Protobuf 中引入索引 Option（如 [(sqlitex.index) = UNIQUE] 或普通索引）。编译时自动生成维护二级索引（IndexKey -> PrimaryKey）的写入逻辑与强类型查询 API，支持等值与前缀范围查询。  
-游标分页算法 (Cursor Pagination)： API 强制采用游标机制，彻底抛弃传统 OFFSET。底层寻址键拼接为 [TableID] + [LastKey]，调用 Pebble 的 Seek 将迭代器瞬间移动到上一页物理边界并向后迭代，单次分页延迟始终恒定为 O(1)。  
+游标分页算法 (Cursor Pagination)： API 强制采用游标机制，彻底抛弃传统 OFFSET。底层寻址键拼接为 `[0xFF] + [TableHash] + [FieldNum] + [LastIndexValue] + [LastPK]`，调用 Pebble 的 Seek 将迭代器瞬间移动到上一页物理边界并向后迭代，单次分页延迟始终恒定为 O(1)。  
 
 ### 开发者体验与可观测性 (Developer Experience & Observability)
 
