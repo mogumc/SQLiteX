@@ -215,8 +215,11 @@ func TestTruncateForDump(t *testing.T) {
 func TestComparePKInt64Order(t *testing.T) {
 	ts := &tableSchema{PrimaryKey: pkSchema{Type: "int64"}}
 	mk := func(id int64) []byte {
-		k := append([]byte{1}, make([]byte, 8)...) // [TableID=1][PK]
-		binary.LittleEndian.PutUint64(k[1:], uint64(id))
+		// P0-4 新格式: [0x00][TableHash 8B][PK]
+		k := make([]byte, 1+8+8)
+		k[0] = dataKeyPrefix // 0x00
+		binary.BigEndian.PutUint64(k[1:9], 12345) // TableHash (任意值)
+		binary.LittleEndian.PutUint64(k[9:], uint64(id))
 		return k
 	}
 
@@ -239,7 +242,14 @@ func TestComparePKInt64Order(t *testing.T) {
 // TestComparePKStringOrder 字符串主键退化为字典序。
 func TestComparePKStringOrder(t *testing.T) {
 	ts := &tableSchema{PrimaryKey: pkSchema{Type: "string"}}
-	mk := func(pk string) []byte { return append([]byte{2}, []byte(pk)...) }
+	mk := func(pk string) []byte {
+		// P0-4 新格式: [0x00][TableHash 8B][PK]
+		k := make([]byte, 1+8+len(pk))
+		k[0] = dataKeyPrefix // 0x00
+		binary.BigEndian.PutUint64(k[1:9], 12345) // TableHash (任意值)
+		copy(k[9:], pk)
+		return k
+	}
 	if comparePK(ts, mk("abc"), mk("abd")) >= 0 {
 		t.Error("string PK should compare lexicographically")
 	}
