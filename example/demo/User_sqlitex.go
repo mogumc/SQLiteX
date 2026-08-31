@@ -4,16 +4,17 @@
 package demo
 
 import (
-	"bytes"
-	"encoding/binary"
-	"fmt"
-	zstd "github.com/klauspost/compress/zstd"
-	"github.com/mogumc/sqlitex"
-	"github.com/mogumc/sqlitex/internal/encoding"
 	"strings"
 	"sync"
+	zstd "github.com/klauspost/compress/zstd"
+	"fmt"
+	"bytes"
+	"github.com/mogumc/sqlitex"
 	"time"
+	"encoding/binary"
+	"github.com/mogumc/sqlitex/internal/encoding"
 )
+
 
 var (
 	_zstdEnc *zstd.Encoder
@@ -23,13 +24,9 @@ var (
 func init() {
 	var err error
 	_zstdEnc, err = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
-	if err != nil {
-		panic(err)
-	}
+	if err != nil { panic(err) }
 	_zstdDec, err = zstd.NewReader(nil, zstd.WithDecoderConcurrency(0))
-	if err != nil {
-		panic(err)
-	}
+	if err != nil { panic(err) }
 }
 
 func _compressZstd(src []byte) []byte {
@@ -42,21 +39,10 @@ func _decompressZstd(src []byte) ([]byte, error) {
 
 func splitWhere(cond string) []string {
 	lastSpace := -1
-	for i := len(cond) - 1; i >= 0; i-- {
-		if cond[i] == ' ' {
-			lastSpace = i
-			break
-		}
-	}
-	if lastSpace < 0 {
-		return nil
-	}
+	for i := len(cond) - 1; i >= 0; i-- { if cond[i] == ' ' { lastSpace = i; break } }
+	if lastSpace < 0 { return nil }
 	inner := cond[:lastSpace]
-	for i := len(inner) - 1; i >= 0; i-- {
-		if inner[i] == ' ' {
-			return []string{inner[:i], inner[i+1:]}
-		}
-	}
+	for i := len(inner) - 1; i >= 0; i-- { if inner[i] == ' ' { return []string{inner[:i], inner[i+1:]} } }
 	return nil
 }
 
@@ -106,7 +92,6 @@ func (m *User) Serialize() []byte {
 	}
 	return buf
 }
-
 // DeserializeUser 从字节切片反序列化为 User。
 func DeserializeUser(data []byte) (*User, error) {
 	if len(data) < 25 {
@@ -129,7 +114,7 @@ func DeserializeUser(data []byte) (*User, error) {
 	if off+vLen > len(data) {
 		return nil, fmt.Errorf("sqlitex: User.Name data truncated: need %d, have %d", vLen, len(data)-off)
 	}
-	m.Name = string(data[off : off+vLen])
+	m.Name = string(data[off:off+vLen])
 	off += vLen
 	// Email (varlen)
 	if off+4 > len(data) {
@@ -140,7 +125,7 @@ func DeserializeUser(data []byte) (*User, error) {
 	if off+vLen > len(data) {
 		return nil, fmt.Errorf("sqlitex: User.Email data truncated: need %d, have %d", vLen, len(data)-off)
 	}
-	m.Email = string(data[off : off+vLen])
+	m.Email = string(data[off:off+vLen])
 	off += vLen
 	if off+8 > len(data) {
 		return nil, fmt.Errorf("sqlitex: User.CreatedAt truncated")
@@ -163,9 +148,9 @@ func DeserializeUser(data []byte) (*User, error) {
 		return nil, fmt.Errorf("sqlitex: User.Bio data truncated: need %d, have %d", vLen, len(data)-off)
 	}
 	if vLen == origLen {
-		m.Bio = string(data[off : off+vLen])
+		m.Bio = string(data[off:off+vLen])
 	} else {
-		dec, err := _decompressZstd(data[off : off+vLen])
+		dec, err := _decompressZstd(data[off:off+vLen])
 		if err != nil {
 			return nil, fmt.Errorf("sqlitex: User.Bio zstd decompress: %w", err)
 		}
@@ -177,12 +162,13 @@ func DeserializeUser(data []byte) (*User, error) {
 
 // Size 返回序列化所需的缓冲区大小（上限估计）。
 func (m *User) Size() int {
-	size := 25
+	size :=25
 	size += 4 + len(m.Name)
 	size += 4 + len(m.Email)
 	size += 4 + len(m.Bio)
 	return size
 }
+
 
 // UserStore 是 User 的强类型存储接口。
 // Create/Update 在唯一索引字段值冲突时返回错误，可用 errors.Is(err, sqlitex.ErrDuplicateKey) 匹配。
@@ -201,7 +187,7 @@ type userStore struct {
 
 // NewUserStore 创建 UserStore 实例。
 func NewUserStore(db *sqlitex.DB) UserStore {
-	return &userStore{db: db, tableID: 1}
+	return &userStore{db: db, tableID: 6216217600485199210}
 }
 
 // Create 创建新的 User 记录（主键已存在时为覆盖语义）。
@@ -323,7 +309,7 @@ func (s *userStore) Delete(Id int64) error {
 func (s *userStore) Get(Id int64) (*User, error) {
 	pkBytes := encodeUserPrimaryKey(Id)
 	key := encoding.EncodeKey(s.tableID, pkBytes)
-
+	
 	value, err := s.db.Get(key)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitex: get User: %w", err)
@@ -341,11 +327,8 @@ func encodeUserPrimaryKey(Id int64) []byte {
 	return buf
 }
 func encodeUserIndexEmailValue(v string) []byte { return []byte(v) }
-func encodeUserIndexCreatedAtValue(v int64) []byte {
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(v))
-	return buf
-}
+func encodeUserIndexCreatedAtValue(v int64) []byte { buf := make([]byte, 8); binary.LittleEndian.PutUint64(buf, uint64(v)); return buf }
+
 
 type UserQuery struct {
 	db      *sqlitex.DB
@@ -359,37 +342,39 @@ func NewUserQuery(db *sqlitex.DB) *UserQuery {
 	return &UserQuery{db: db, where: make([]string, 0), args: make([]interface{}, 0)}
 }
 
+
 func (q *UserQuery) WhereName(op string, value string) *UserQuery {
-	q.where = append(q.where, "Name "+op+" ?")
+	q.where = append(q.where, "Name " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
 func (q *UserQuery) WhereEmail(op string, value string) *UserQuery {
-	q.where = append(q.where, "Email "+op+" ?")
+	q.where = append(q.where, "Email " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
 func (q *UserQuery) WhereCreatedAt(op string, value int64) *UserQuery {
-	q.where = append(q.where, "CreatedAt "+op+" ?")
+	q.where = append(q.where, "CreatedAt " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
 func (q *UserQuery) WhereActive(op string, value bool) *UserQuery {
-	q.where = append(q.where, "Active "+op+" ?")
+	q.where = append(q.where, "Active " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
 func (q *UserQuery) WhereBio(op string, value string) *UserQuery {
-	q.where = append(q.where, "Bio "+op+" ?")
+	q.where = append(q.where, "Bio " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
-func (q *UserQuery) Limit(n int) *UserQuery             { q.limit = n; return q }
+
+func (q *UserQuery) Limit(n int) *UserQuery { q.limit = n; return q }
 func (q *UserQuery) AfterKey(lastKey []byte) *UserQuery { q.lastKey = lastKey; return q }
 func (q *UserQuery) Exec() ([]*User, error) {
 	if len(q.where) > 0 {
@@ -405,121 +390,67 @@ func (q *UserQuery) execIndexed() ([]*User, error) {
 	val := q.args[0]
 	var fieldValue []byte
 	fieldValue = []byte(val.(string))
-	prefix := encoding.EncodeIndexPrefix(1, 3, fieldValue)
+	prefix := encoding.EncodeIndexPrefix(6216217600485199210, 3, fieldValue)
 	iter := q.db.Iterate(prefix)
-	if iter == nil {
-		return nil, nil
-	}
+	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 {
-		iter.SeekLT(q.lastKey)
-		if iter.Valid() {
-			iter.Next()
-		}
-	}
+	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
 
 	var results []*User
 	for iter.Next() {
 		pkBytes := iter.Value()
-		dataKey := encoding.EncodeKey(1, pkBytes)
+		dataKey := encoding.EncodeKey(6216217600485199210, pkBytes)
 		value, err := q.db.Get(dataKey)
-		if err != nil || value == nil {
-			continue
-		}
+		if err != nil || value == nil { continue }
 		m, err := DeserializeUser(value)
-		if err != nil {
-			continue
-		}
-		if len(q.where) > 1 && !q.matchWhereTail(m) {
-			continue
-		}
+		if err != nil { continue }
+		if len(q.where) > 1 && !q.matchWhereTail(m) { continue }
 		results = append(results, m)
-		if q.limit > 0 && len(results) >= q.limit {
-			break
-		}
+		if q.limit > 0 && len(results) >= q.limit { break }
 	}
 	return results, nil
 }
 
 func (q *UserQuery) execFullScan() ([]*User, error) {
-	prefix := encoding.EncodeKey(1, nil)
+	prefix := encoding.EncodeKey(6216217600485199210, nil)
 	iter := q.db.Iterate(prefix)
-	if iter == nil {
-		return nil, nil
-	}
+	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 {
-		iter.SeekLT(q.lastKey)
-		if iter.Valid() {
-			iter.Next()
-		}
-	}
+	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
 
 	var results []*User
 	for iter.Next() {
 		value := iter.Value()
 		m, err := DeserializeUser(value)
-		if err != nil {
-			continue
-		}
+		if err != nil { continue }
 		if q.matchWhere(m) {
 			results = append(results, m)
-			if q.limit > 0 && len(results) >= q.limit {
-				break
-			}
+			if q.limit > 0 && len(results) >= q.limit { break }
 		}
 	}
 	return results, nil
 }
 
 func (q *UserQuery) First() (*User, error) {
-	q.limit = 1
-	r, e := q.Exec()
-	if e != nil {
-		return nil, e
-	}
-	if len(r) == 0 {
-		return nil, nil
-	}
-	return r[0], nil
+	q.limit = 1; r, e := q.Exec(); if e != nil { return nil, e }
+	if len(r) == 0 { return nil, nil }; return r[0], nil
 }
 func (q *UserQuery) Count() (int, error) {
-	r, e := q.Exec()
-	if e != nil {
-		return 0, e
-	}
-	return len(r), nil
+	r, e := q.Exec(); if e != nil { return 0, e }; return len(r), nil
 }
 
 func (q *UserQuery) matchWhere(item *User) bool {
 	for _, cond := range q.where {
 		parts := splitWhere(cond)
-		if len(parts) != 2 {
-			continue
-		}
+		if len(parts) != 2 { continue }
 		field, op := parts[0], parts[1]
 		switch field {
-		case "Name":
-			if !q.compareName(item.Name, op) {
-				return false
-			}
-		case "Email":
-			if !q.compareEmail(item.Email, op) {
-				return false
-			}
-		case "CreatedAt":
-			if !q.compareCreatedAt(item.CreatedAt, op) {
-				return false
-			}
-		case "Active":
-			if !q.compareActive(item.Active, op) {
-				return false
-			}
-		case "Bio":
-			if !q.compareBio(item.Bio, op) {
-				return false
-			}
-
+		case "Name": if !q.compareName(item.Name, op) { return false }
+		case "Email": if !q.compareEmail(item.Email, op) { return false }
+		case "CreatedAt": if !q.compareCreatedAt(item.CreatedAt, op) { return false }
+		case "Active": if !q.compareActive(item.Active, op) { return false }
+		case "Bio": if !q.compareBio(item.Bio, op) { return false }
+		
 		}
 	}
 	return true
@@ -527,169 +458,96 @@ func (q *UserQuery) matchWhere(item *User) bool {
 
 func (q *UserQuery) matchWhereTail(item *User) bool {
 	for i, cond := range q.where {
-		if i == 0 {
-			continue
-		}
+		if i == 0 { continue }
 		parts := splitWhere(cond)
-		if len(parts) != 2 {
-			continue
-		}
+		if len(parts) != 2 { continue }
 		field, op := parts[0], parts[1]
 		switch field {
-		case "Name":
-			if !q.compareName(item.Name, op) {
-				return false
-			}
-		case "Email":
-			if !q.compareEmail(item.Email, op) {
-				return false
-			}
-		case "CreatedAt":
-			if !q.compareCreatedAt(item.CreatedAt, op) {
-				return false
-			}
-		case "Active":
-			if !q.compareActive(item.Active, op) {
-				return false
-			}
-		case "Bio":
-			if !q.compareBio(item.Bio, op) {
-				return false
-			}
-
+		case "Name": if !q.compareName(item.Name, op) { return false }
+		case "Email": if !q.compareEmail(item.Email, op) { return false }
+		case "CreatedAt": if !q.compareCreatedAt(item.CreatedAt, op) { return false }
+		case "Active": if !q.compareActive(item.Active, op) { return false }
+		case "Bio": if !q.compareBio(item.Bio, op) { return false }
+		
 		}
 	}
 	return true
 }
 
+
 func (q *UserQuery) compareName(actual string, op string) bool {
 	targetIdx := -1
-
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "Name" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Name" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(string)
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	case "LIKE":
-		return strings.Contains(actual, expected)
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case "LIKE": return strings.Contains(actual, expected)
 	}
 	return false
 }
 
 func (q *UserQuery) compareEmail(actual string, op string) bool {
 	targetIdx := -1
-
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "Email" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Email" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(string)
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	case "LIKE":
-		return strings.Contains(actual, expected)
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case "LIKE": return strings.Contains(actual, expected)
 	}
 	return false
 }
 
 func (q *UserQuery) compareCreatedAt(actual int64, op string) bool {
 	targetIdx := -1
-
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "CreatedAt" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "CreatedAt" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(int64)
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	case ">":
-		return actual > expected
-	case "<":
-		return actual < expected
-	case ">=":
-		return actual >= expected
-	case "<=":
-		return actual <= expected
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case ">":  return actual > expected
+	case "<":  return actual < expected
+	case ">=": return actual >= expected
+	case "<=": return actual <= expected
 	}
 	return false
 }
 
 func (q *UserQuery) compareActive(actual bool, op string) bool {
 	targetIdx := -1
-
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "Active" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Active" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(bool)
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
+	case "=": return actual == expected
+	case "!=": return actual != expected
 	}
 	return false
 }
 
 func (q *UserQuery) compareBio(actual string, op string) bool {
 	targetIdx := -1
-
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "Bio" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Bio" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(string)
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	case "LIKE":
-		return strings.Contains(actual, expected)
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case "LIKE": return strings.Contains(actual, expected)
 	}
 	return false
 }
+
+
 
 // mockUserStore 实现 UserStore 接口的内存版本，用于单元测试。
 type mockUserStore struct {
@@ -803,7 +661,6 @@ func (m *Session) SerializeWithExpiry(expiresAt int64) []byte {
 	off += 1
 	return buf
 }
-
 // DeserializeSession 从字节切片反序列化为 Session。
 // 忽略 Meta Header 的过期时间戳，返回数据本身。
 func DeserializeSession(data []byte) (*Session, error) {
@@ -835,7 +692,7 @@ func DeserializeSessionMeta(data []byte) (*Session, int64, error) {
 	if off+vLen > len(data) {
 		return nil, 0, fmt.Errorf("sqlitex: Session.Token data truncated: need %d, have %d", vLen, len(data)-off)
 	}
-	m.Token = string(data[off : off+vLen])
+	m.Token = string(data[off:off+vLen])
 	off += vLen
 	// UserId (varlen)
 	if off+4 > len(data) {
@@ -846,7 +703,7 @@ func DeserializeSessionMeta(data []byte) (*Session, int64, error) {
 	if off+vLen > len(data) {
 		return nil, 0, fmt.Errorf("sqlitex: Session.UserId data truncated: need %d, have %d", vLen, len(data)-off)
 	}
-	m.UserId = string(data[off : off+vLen])
+	m.UserId = string(data[off:off+vLen])
 	off += vLen
 	if off+1 > len(data) {
 		return nil, 0, fmt.Errorf("sqlitex: Session.Active truncated")
@@ -858,11 +715,12 @@ func DeserializeSessionMeta(data []byte) (*Session, int64, error) {
 
 // Size 返回序列化所需的缓冲区大小（上限估计），含 8B Meta Header。
 func (m *Session) Size() int {
-	size := 9 + 8
+	size :=9 + 8
 	size += 4 + len(m.Token)
 	size += 4 + len(m.UserId)
 	return size
 }
+
 
 // SessionStore 是 Session 的强类型存储接口。
 type SessionStore interface {
@@ -883,7 +741,7 @@ type sessionStore struct {
 
 // NewSessionStore 创建 SessionStore 实例。
 func NewSessionStore(db *sqlitex.DB) SessionStore {
-	return &sessionStore{db: db, tableID: 2}
+	return &sessionStore{db: db, tableID: 12471666076920910287}
 }
 
 // Create 创建新的 Session 记录（主键已存在时为覆盖语义）。
@@ -970,7 +828,7 @@ func (s *sessionStore) Delete(Id int64) error {
 func (s *sessionStore) Get(Id int64) (*Session, error) {
 	pkBytes := encodeSessionPrimaryKey(Id)
 	key := encoding.EncodeKey(s.tableID, pkBytes)
-
+	
 	value, err := s.db.Get(key)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitex: get Session: %w", err)
@@ -1043,6 +901,7 @@ func (s *sessionStore) PurgeExpired() (int, error) {
 	return count, nil
 }
 
+
 type SessionQuery struct {
 	db      *sqlitex.DB
 	where   []string
@@ -1055,25 +914,27 @@ func NewSessionQuery(db *sqlitex.DB) *SessionQuery {
 	return &SessionQuery{db: db, where: make([]string, 0), args: make([]interface{}, 0)}
 }
 
+
 func (q *SessionQuery) WhereToken(op string, value string) *SessionQuery {
-	q.where = append(q.where, "Token "+op+" ?")
+	q.where = append(q.where, "Token " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
 func (q *SessionQuery) WhereUserId(op string, value string) *SessionQuery {
-	q.where = append(q.where, "UserId "+op+" ?")
+	q.where = append(q.where, "UserId " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
 func (q *SessionQuery) WhereActive(op string, value bool) *SessionQuery {
-	q.where = append(q.where, "Active "+op+" ?")
+	q.where = append(q.where, "Active " + op + " ?")
 	q.args = append(q.args, value)
 	return q
 }
 
-func (q *SessionQuery) Limit(n int) *SessionQuery             { q.limit = n; return q }
+
+func (q *SessionQuery) Limit(n int) *SessionQuery { q.limit = n; return q }
 func (q *SessionQuery) AfterKey(lastKey []byte) *SessionQuery { q.lastKey = lastKey; return q }
 func (q *SessionQuery) Exec() ([]*Session, error) {
 	if len(q.where) > 0 {
@@ -1089,122 +950,74 @@ func (q *SessionQuery) execIndexed() ([]*Session, error) {
 	val := q.args[0]
 	var fieldValue []byte
 	fieldValue = []byte(val.(string))
-	prefix := encoding.EncodeIndexPrefix(2, 3, fieldValue)
+	prefix := encoding.EncodeIndexPrefix(12471666076920910287, 3, fieldValue)
 	iter := q.db.Iterate(prefix)
-	if iter == nil {
-		return nil, nil
-	}
+	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 {
-		iter.SeekLT(q.lastKey)
-		if iter.Valid() {
-			iter.Next()
-		}
-	}
+	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
 
 	var results []*Session
 	for iter.Next() {
 		pkBytes := iter.Value()
-		dataKey := encoding.EncodeKey(2, pkBytes)
+		dataKey := encoding.EncodeKey(12471666076920910287, pkBytes)
 		value, err := q.db.Get(dataKey)
-		if err != nil || value == nil {
-			continue
-		}
+		if err != nil || value == nil { continue }
 		m, expiresAt, err := DeserializeSessionMeta(value)
-		if err != nil {
-			continue
-		}
+		if err != nil { continue }
 		if expiresAt > 0 && time.Now().UnixNano() > expiresAt {
-			deleteSessionWithIndexes(q.db, 2, dataKey, m) // 惰性删除 + 索引清理
+			deleteSessionWithIndexes(q.db, 12471666076920910287, dataKey, m) // 惰性删除 + 索引清理
 			continue
 		}
-		if len(q.where) > 1 && !q.matchWhereTail(m) {
-			continue
-		}
+		if len(q.where) > 1 && !q.matchWhereTail(m) { continue }
 		results = append(results, m)
-		if q.limit > 0 && len(results) >= q.limit {
-			break
-		}
+		if q.limit > 0 && len(results) >= q.limit { break }
 	}
 	return results, nil
 }
 
 func (q *SessionQuery) execFullScan() ([]*Session, error) {
-	prefix := encoding.EncodeKey(2, nil)
+	prefix := encoding.EncodeKey(12471666076920910287, nil)
 	iter := q.db.Iterate(prefix)
-	if iter == nil {
-		return nil, nil
-	}
+	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 {
-		iter.SeekLT(q.lastKey)
-		if iter.Valid() {
-			iter.Next()
-		}
-	}
+	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
 
 	var results []*Session
 	for iter.Next() {
 		key := iter.Key()
 		value := iter.Value()
 		m, expiresAt, err := DeserializeSessionMeta(value)
-		if err != nil {
-			continue
-		}
+		if err != nil { continue }
 		if expiresAt > 0 && time.Now().UnixNano() > expiresAt {
-			deleteSessionWithIndexes(q.db, 2, key, m) // 惰性删除 + 索引清理
+			deleteSessionWithIndexes(q.db, 12471666076920910287, key, m) // 惰性删除 + 索引清理
 			continue
 		}
 		if q.matchWhere(m) {
 			results = append(results, m)
-			if q.limit > 0 && len(results) >= q.limit {
-				break
-			}
+			if q.limit > 0 && len(results) >= q.limit { break }
 		}
 	}
 	return results, nil
 }
 
 func (q *SessionQuery) First() (*Session, error) {
-	q.limit = 1
-	r, e := q.Exec()
-	if e != nil {
-		return nil, e
-	}
-	if len(r) == 0 {
-		return nil, nil
-	}
-	return r[0], nil
+	q.limit = 1; r, e := q.Exec(); if e != nil { return nil, e }
+	if len(r) == 0 { return nil, nil }; return r[0], nil
 }
 func (q *SessionQuery) Count() (int, error) {
-	r, e := q.Exec()
-	if e != nil {
-		return 0, e
-	}
-	return len(r), nil
+	r, e := q.Exec(); if e != nil { return 0, e }; return len(r), nil
 }
 
 func (q *SessionQuery) matchWhere(item *Session) bool {
 	for _, cond := range q.where {
 		parts := splitWhere(cond)
-		if len(parts) != 2 {
-			continue
-		}
+		if len(parts) != 2 { continue }
 		field, op := parts[0], parts[1]
 		switch field {
-		case "Token":
-			if !q.compareToken(item.Token, op) {
-				return false
-			}
-		case "UserId":
-			if !q.compareUserId(item.UserId, op) {
-				return false
-			}
-		case "Active":
-			if !q.compareActive(item.Active, op) {
-				return false
-			}
-
+		case "Token": if !q.compareToken(item.Token, op) { return false }
+		case "UserId": if !q.compareUserId(item.UserId, op) { return false }
+		case "Active": if !q.compareActive(item.Active, op) { return false }
+		
 		}
 	}
 	return true
@@ -1212,105 +1025,63 @@ func (q *SessionQuery) matchWhere(item *Session) bool {
 
 func (q *SessionQuery) matchWhereTail(item *Session) bool {
 	for i, cond := range q.where {
-		if i == 0 {
-			continue
-		}
+		if i == 0 { continue }
 		parts := splitWhere(cond)
-		if len(parts) != 2 {
-			continue
-		}
+		if len(parts) != 2 { continue }
 		field, op := parts[0], parts[1]
 		switch field {
-		case "Token":
-			if !q.compareToken(item.Token, op) {
-				return false
-			}
-		case "UserId":
-			if !q.compareUserId(item.UserId, op) {
-				return false
-			}
-		case "Active":
-			if !q.compareActive(item.Active, op) {
-				return false
-			}
-
+		case "Token": if !q.compareToken(item.Token, op) { return false }
+		case "UserId": if !q.compareUserId(item.UserId, op) { return false }
+		case "Active": if !q.compareActive(item.Active, op) { return false }
+		
 		}
 	}
 	return true
 }
 
+
 func (q *SessionQuery) compareToken(actual string, op string) bool {
 	targetIdx := -1
-
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "Token" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Token" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(string)
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	case "LIKE":
-		return strings.Contains(actual, expected)
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case "LIKE": return strings.Contains(actual, expected)
 	}
 	return false
 }
 
 func (q *SessionQuery) compareUserId(actual string, op string) bool {
 	targetIdx := -1
-
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "UserId" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "UserId" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(string)
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	case "LIKE":
-		return strings.Contains(actual, expected)
+	case "=": return actual == expected
+	case "!=": return actual != expected
+	case "LIKE": return strings.Contains(actual, expected)
 	}
 	return false
 }
 
 func (q *SessionQuery) compareActive(actual bool, op string) bool {
 	targetIdx := -1
-
-	for i, w := range q.where {
-		parts := splitWhere(w)
-		if len(parts) == 2 && parts[0] == "Active" && parts[1] == op {
-			targetIdx = i
-			break
-		}
-	}
-	if targetIdx < 0 || targetIdx >= len(q.args) {
-		return false
-	}
+	
+	for i, w := range q.where { parts := splitWhere(w); if len(parts) == 2 && parts[0] == "Active" && parts[1] == op { targetIdx = i; break } }
+	if targetIdx < 0 || targetIdx >= len(q.args) { return false }
 	expected := q.args[targetIdx].(bool)
 	switch op {
-	case "=":
-		return actual == expected
-	case "!=":
-		return actual != expected
+	case "=": return actual == expected
+	case "!=": return actual != expected
 	}
 	return false
 }
+
+
 
 // mockSessionStore 实现 SessionStore 接口的内存版本，用于单元测试。
 type mockSessionStore struct {
@@ -1392,3 +1163,5 @@ func (m *mockSessionStore) Get(Id int64) (*Session, error) {
 func (m *mockSessionStore) PurgeExpired() (int, error) {
 	return 0, nil
 }
+
+
