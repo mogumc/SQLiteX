@@ -148,59 +148,6 @@ func getSourceFiles(req *pluginpb.CodeGeneratorRequest, msgName string) string {
 	return "unknown.proto"
 }
 
-// mergeCodeSections 合并多个代码段，去除重复的 package 和 import 声明。
-func mergeCodeSections(pkgName string, sections []string) string {
-	// 收集所有 unique imports
-	importSet := make(map[string]bool)
-	var codeBodies []string
-
-	for _, sec := range sections {
-		imports, body := extractImports(sec)
-		for _, imp := range imports {
-			importSet[imp] = true
-		}
-		codeBodies = append(codeBodies, body)
-	}
-
-	// 构建输出
-	var buf strings.Builder
-	buf.WriteString("package " + pkgName + "\n\n")
-
-	if len(importSet) > 0 {
-		buf.WriteString("import (\n")
-		for imp := range importSet {
-			buf.WriteString("\t" + imp + "\n")
-		}
-		buf.WriteString(")\n\n")
-	}
-
-	// 特殊处理：在包声明后添加 var _ 占位符（来自 serializer）
-	var vars string
-	for _, line := range codeBodies {
-		// 收集所有 var _ = xxx 行
-		for _, l := range linesOf(line) {
-			if len(l) > 5 && l[:6] == "var _ =" {
-				if !strings.Contains(vars, l) {
-					vars += l + "\n"
-				}
-			}
-		}
-	}
-
-	if vars != "" {
-		buf.WriteString(vars + "\n")
-	}
-
-	for _, body := range codeBodies {
-		// 移除 var _ 行（已在顶部统一声明）
-		body = stripVarUnderbars(body)
-		buf.WriteString(body)
-		buf.WriteString("\n")
-	}
-
-	return buf.String()
-}
-
 // extractImports 从 Go 源码中提取 import 块和后续代码体。
 func extractImports(code string) ([]string, string) {
 	lines := linesOf(code)
@@ -246,16 +193,4 @@ func linesOf(s string) []string {
 		result = append(result, line)
 	}
 	return result
-}
-
-func stripVarUnderbars(s string) string {
-	lines := linesOf(s)
-	var result []string
-	for _, line := range lines {
-		if len(line) > 6 && line[:6] == "var _ =" {
-			continue
-		}
-		result = append(result, line)
-	}
-	return strings.Join(result, "\n")
 }

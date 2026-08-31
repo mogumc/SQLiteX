@@ -3,6 +3,7 @@ package sqlitex
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,7 @@ type DB struct {
 	cfg      Config
 	closed   atomic.Bool
 	metrics  *metrics // Config.Metrics=true 时非 nil
+	mu       sync.RWMutex // 保护 Pebble 访问，防止 Close 与读路径竞态
 }
 
 // Open 打开或创建指定目录下的 SQLiteX 数据库。
@@ -108,6 +110,9 @@ func Open(cfg Config) (*DB, error) {
 // 先停止写队列（排空并等待待处理写入完成），再关闭 Pebble 并释放 Cache。
 // 重复调用返回 ErrDBClosed。
 func (db *DB) Close() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
 	if !db.closed.CompareAndSwap(false, true) {
 		return ErrDBClosed
 	}
@@ -156,6 +161,9 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 
 // get 是 Get 的实际实现，由 Get 包装埋点后调用。
 func (db *DB) get(key []byte) ([]byte, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
 	if db.closed.Load() {
 		return nil, ErrDBClosed
 	}
@@ -219,6 +227,9 @@ func (db *DB) Delete(key []byte) error {
 // 写入后自动失效 TinyLFU 中对应 key 的缓存。
 func (db *DB) PutSync(key, value []byte) error {
 	t := db.startOp("put_sync")
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
 	if db.closed.Load() {
 		return ErrDBClosed
 	}
@@ -255,6 +266,9 @@ func (db *DB) WriteBatch(ops []KVPair) error {
 
 // writeBatch 是 WriteBatch 的实际实现，由 WriteBatch 包装埋点后调用。
 func (db *DB) writeBatch(ops []KVPair) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
 	if db.closed.Load() {
 		return ErrDBClosed
 	}
@@ -422,6 +436,9 @@ func (it *PrefixIterator) SeekLT(target []byte) {
 
 // Iterate 创建一个前缀迭代器，用于按 Key 顺序扫描指定前缀的所有记录。
 func (db *DB) Iterate(prefix []byte) *PrefixIterator {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
 	if db.closed.Load() || len(prefix) == 0 {
 		return nil
 	}
