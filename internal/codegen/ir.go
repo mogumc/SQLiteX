@@ -6,6 +6,7 @@ package codegen
 
 import (
 	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"time"
@@ -70,12 +71,16 @@ type FieldIR struct {
 
 // BuildIR 从 protobuf FileDescriptor 构建 TableIR 列表。
 // 仅处理标记了 (sqlitex.table) option 的 Message。
+// TableID 由消息全名（proto package + MessageName）的 FNV-1a 64 位哈希决定，
+// 确保 Schema 演进（新增/删除/重排表）时 TableID 稳定，避免数据静默错位。
 func BuildIR(files []*descriptorpb.FileDescriptorProto) ([]*TableIR, error) {
 	var tables []*TableIR
-	var tableID uint64
+	// 哈希碰撞校验：记录已分配的 TableID，编译期检出冲突
+	tableIDSet := make(map[uint64]string) // tableID -> fully-qualified name
 
 	for _, file := range files {
 		goPkg := resolveGoPackage(file)
+		pkg := file.GetPackage()
 
 		for _, msg := range file.MessageType {
 			// 跳过 protoc 内部类型和嵌套 Message（Phase 1 仅支持顶层）
@@ -88,7 +93,21 @@ func BuildIR(files []*descriptorpb.FileDescriptorProto) ([]*TableIR, error) {
 				continue
 			}
 
-			tableID++
+			// 计算消息全名（fully-qualified name）
+			fqName := pkg + "." + msg.GetName()
+			if pkg == "" {
+				fqName = msg.GetName()
+			}
+
+			// FNV-1a 64 位哈希
+			tableID := fnv1a64(fqName)
+
+			// 碰撞校验
+			if existing, ok := tableIDSet[tableID]; ok {
+				return nil, fmt.Errorf("table ID collision: %q and %q both hash to %d; rename one table or use explicit (sqlitex.table).table_id option", existing, fqName, tableID)
+			}
+			tableIDSet[tableID] = fqName
+
 			table, err := buildTableIR(msg, tableOpt, goPkg, tableID)
 			if err != nil {
 				return nil, fmt.Errorf("message %s: %w", msg.GetName(), err)
@@ -97,6 +116,13 @@ func BuildIR(files []*descriptorpb.FileDescriptorProto) ([]*TableIR, error) {
 		}
 	}
 	return tables, nil
+}
+
+// fnv1a64 计算 FNV-1a 64 位哈希（跨版本确定性，零依赖）。
+func fnv1a64(s string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return h.Sum64()
 }
 
 // buildTableIR 从单个 Message 构建 TableIR。
