@@ -23,12 +23,13 @@ func GenerateSerializer(table *TableIR) string {
 
 // serializerData 是序列化模板的数据输入。
 type serializerData struct {
-	MessageName string
-	PackageName string
-	Fields      []serFieldInfo
-	MinSize     int // 最小合法数据长度（仅含固定长度字段）
-	HasTTL      bool
-	HasFloat    bool // 是否含 float32/float64 字段（决定 math import）
+	MessageName   string
+	PackageName   string
+	Fields        []serFieldInfo
+	MinSize       int  // 最小合法数据长度（仅含固定长度字段）
+	HasTTL        bool
+	HasFloat      bool // 是否含 float32/float64 字段（决定 math import）
+	HasVarLenField bool // 是否含变长字段（决定 vLen 变量声明）
 }
 
 // serFieldInfo 描述单个字段在序列化中的行为。
@@ -44,6 +45,7 @@ func buildSerializerData(table *TableIR) serializerData {
 	var fields []serFieldInfo
 	minSize := 0
 	hasFloat := false
+	hasVarLenField := false
 
 	// 构建压缩字段名集合，O(1) 查找
 	compressSet := make(map[string]bool)
@@ -67,7 +69,9 @@ func buildSerializerData(table *TableIR) serializerData {
 		}
 
 		fields = append(fields, fi)
-		if !fi.IsVarLen {
+		if fi.IsVarLen {
+			hasVarLenField = true
+		} else {
 			minSize += fi.FixedLen
 		}
 		// 压缩字段额外 8 字节 headroom (dataLen + originalLen)
@@ -80,12 +84,13 @@ func buildSerializerData(table *TableIR) serializerData {
 	}
 
 	return serializerData{
-		MessageName: table.MessageName,
-		PackageName: table.GoPackage,
-		Fields:      fields,
-		MinSize:     minSize,
-		HasTTL:      table.HasTTL,
-		HasFloat:    hasFloat,
+		MessageName:    table.MessageName,
+		PackageName:    table.GoPackage,
+		Fields:         fields,
+		MinSize:        minSize,
+		HasTTL:         table.HasTTL,
+		HasFloat:       hasFloat,
+		HasVarLenField: hasVarLenField,
 	}
 }
 
@@ -230,7 +235,9 @@ func Deserialize{{.MessageName}}Meta(data []byte) (*{{.MessageName}}, int64, err
 	expiresAt := int64(binary.LittleEndian.Uint64(data))
 	m := &{{.MessageName}}{}
 	off := 8
+{{- if .HasVarLenField}}
 	var vLen int
+{{- end}}
 {{- else}}
 // Deserialize{{.MessageName}} 从字节切片反序列化为 {{.MessageName}}。
 func Deserialize{{.MessageName}}(data []byte) (*{{.MessageName}}, error) {
@@ -239,7 +246,9 @@ func Deserialize{{.MessageName}}(data []byte) (*{{.MessageName}}, error) {
 	}
 	m := &{{.MessageName}}{}
 	off := 0
+{{- if .HasVarLenField}}
 	var vLen int
+{{- end}}
 {{- end}}
 {{- range .Fields}}
 {{- if .IsVarLen}}

@@ -7,15 +7,16 @@ import (
 )
 
 type queryData struct {
-	PackageName  string
-	StoreName    string
-	EntityName   string
-	QueryName    string
-	TableID      uint64
-	QueryFields  []*queryField
-	IndexedField *queryField
-	PKGoType     string
-	HasTTL       bool
+	PackageName   string
+	StoreName     string
+	EntityName    string
+	QueryName     string
+	TableID       uint64
+	QueryFields   []*queryField
+	IndexedField  *queryField
+	PKGoType      string
+	HasTTL        bool
+	HasStringLike bool // 是否存在 string 字段需要 LIKE 查询（决定 strings import）
 }
 
 type queryField struct {
@@ -60,6 +61,10 @@ func GenerateQuery(table *TableIR) (string, error) {
 		if qf.IsIndex && data.IndexedField == nil {
 			data.IndexedField = qf
 		}
+		// 检查是否存在 string 字段（需要 LIKE 查询支持）
+		if f.GoType == "string" {
+			data.HasStringLike = true
+		}
 	}
 
 	var buf bytes.Buffer
@@ -82,7 +87,9 @@ import (
 {{- if .HasTTL}}
 	"time"
 {{- end}}
+{{- if .HasStringLike}}
 	"strings"
+{{- end}}
 
 	"github.com/mogumc/sqlitex"
 	"github.com/mogumc/sqlitex/internal/encoding"

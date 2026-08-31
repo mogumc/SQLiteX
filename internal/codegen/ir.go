@@ -151,6 +151,13 @@ func buildTableIR(
 		if err != nil {
 			return nil, fmt.Errorf("field %s: %w", field.GetName(), err)
 		}
+
+		// Phase 1 不支持 repeated 字段
+		if fir.IsRepeated {
+			return nil, fmt.Errorf("field %s: repeated fields are not supported in Phase 1; "+
+				"consider using a separate table or string field with delimiter", field.GetName())
+		}
+
 		table.Fields = append(table.Fields, fir)
 
 		// 识别主键

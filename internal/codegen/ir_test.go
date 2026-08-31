@@ -302,3 +302,42 @@ func TestBuildTableIRTTL(t *testing.T) {
 		t.Error("expected error for negative TTL")
 	}
 }
+
+// TestBuildTableIRRepeatedField 验证 Phase 1 拒绝 repeated 字段。
+func TestBuildTableIRRepeatedField(t *testing.T) {
+	msg := &descriptorpb.DescriptorProto{
+		Name: strPtr("User"),
+		Field: []*descriptorpb.FieldDescriptorProto{
+			{
+				Name:   strPtr("id"),
+				Number: intPtr(1),
+				Type:   typPtr(descriptorpb.FieldDescriptorProto_TYPE_INT64),
+				Label:  labelPtr(descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL),
+			},
+			{
+				Name:   strPtr("tags"),
+				Number: intPtr(2),
+				Type:   typPtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
+				Label:  labelPtr(descriptorpb.FieldDescriptorProto_LABEL_REPEATED), // repeated 字段
+			},
+		},
+	}
+	tableOpt := &sqlitexpb.TableOption{PrimaryKey: "id"}
+
+	_, err := buildTableIR(msg, tableOpt, "genpkg", 1)
+	if err == nil {
+		t.Fatal("expected error for repeated field, got nil")
+	}
+	if !containsSubstring(err.Error(), "repeated fields are not supported") {
+		t.Errorf("error message = %q, want substring %q", err.Error(), "repeated fields are not supported")
+	}
+}
+
+func containsSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
