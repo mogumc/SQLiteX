@@ -38,6 +38,7 @@ go.work.sum
 .codex/
 .codebuddy/
 .workbuddy/
+.workbuddy-ai/
 .trellis/
 
 # sqlitex-admin frontend

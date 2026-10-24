@@ -15,7 +15,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -30,6 +29,7 @@ import (
 	"github.com/jhump/protoreflect/desc/protoparse"
 	"github.com/klauspost/compress/zstd"
 	"github.com/mogumc/sqlitex/internal/codegen"
+	sqlitexencoding "github.com/mogumc/sqlitex/internal/encoding"
 	sqlitexpb "github.com/mogumc/sqlitex/proto/sqlitex"
 )
 
@@ -295,86 +295,32 @@ func (s *schemaStore) decodeKey(raw []byte) decodedKey {
 	return d
 }
 
-// comparePK 比较两个同表数据 Key 的主键顺序（数值感知）。
-// 物理 Key 中 int 主键为小端编码，字节序不等于数值序（如 pk=256 字节序先于 pk=1），
-// 表格视图需要按数值序排列时使用本函数；string/bytes 主键退化为字典序。
-func comparePK(ts *tableSchema, a, b []byte) int {
-	pa, pb := pkBytesOf(ts, a), pkBytesOf(ts, b)
-	switch ts.PrimaryKey.Type {
-	case "int64", "sint64":
-		if len(pa) == 8 && len(pb) == 8 {
-			return cmpInt64(int64(binary.LittleEndian.Uint64(pa)), int64(binary.LittleEndian.Uint64(pb)))
-		}
-	case "uint64":
-		if len(pa) == 8 && len(pb) == 8 {
-			return cmpUint64(binary.LittleEndian.Uint64(pa), binary.LittleEndian.Uint64(pb))
-		}
-	case "int32", "sint32":
-		if len(pa) == 4 && len(pb) == 4 {
-			return cmpInt64(int64(int32(binary.LittleEndian.Uint32(pa))), int64(int32(binary.LittleEndian.Uint32(pb))))
-		}
-	case "uint32":
-		if len(pa) == 4 && len(pb) == 4 {
-			return cmpInt64(int64(binary.LittleEndian.Uint32(pa)), int64(binary.LittleEndian.Uint32(pb)))
-		}
-	}
-	return bytes.Compare(pa, pb)
-}
-
-// pkBytesOf 从数据 Key 中剥离 [0x00][TableHash 8B] 前缀，返回 PK bytes。
-func pkBytesOf(ts *tableSchema, raw []byte) []byte {
-	if len(raw) < 9 || raw[0] != dataKeyPrefix {
-		return nil
-	}
-	return raw[9:]
-}
-
-func cmpInt64(a, b int64) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
-}
-
-func cmpUint64(a, b uint64) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
-}
-
-// decodePK 按主键类型解码 PK bytes（与生成代码 encodePrimaryKey 互逆）。
+// decodePK 按主键类型解码保序 PK bytes（与生成代码 encodePrimaryKey 互逆）。
 func decodePK(ts *tableSchema, b []byte) any {
 	switch ts.PrimaryKey.Type {
 	case "string":
 		return string(b)
-	case "int64", "uint64":
-		if len(b) != 8 {
-			return printable(b)
+	case "int64":
+		if len(b) == 8 {
+			return sqlitexencoding.DecodeOrderedInt64(b)
 		}
-		v := binary.LittleEndian.Uint64(b)
-		if ts.PrimaryKey.Type == "int64" {
-			return int64(v)
+	case "uint64":
+		if len(b) == 8 {
+			return sqlitexencoding.DecodeOrderedUint64(b)
 		}
-		return v
-	case "int32", "uint32":
-		if len(b) != 4 {
-			return printable(b)
+	case "int32":
+		if len(b) == 4 {
+			return sqlitexencoding.DecodeOrderedInt32(b)
 		}
-		v := binary.LittleEndian.Uint32(b)
-		if ts.PrimaryKey.Type == "int32" {
-			return int32(v)
+	case "uint32":
+		if len(b) == 4 {
+			return sqlitexencoding.DecodeOrderedUint32(b)
 		}
-		return v
-	default: // []byte 等变长主键
-		return printable(b)
 	}
+	if len(b) == 0 {
+		return ""
+	}
+	return printable(b) // []byte 或非法定长编码
 }
 
 // decodeScalarByType 按字段类型解码索引 Key 中的字段值（无长度前缀）。

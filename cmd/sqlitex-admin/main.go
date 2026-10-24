@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -22,7 +23,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -161,10 +161,8 @@ type rowView struct {
 
 // keysResponse 是 /api/keys 的分页响应。
 type keysResponse struct {
-	Entries       []keyEntry `json:"entries"`
-	NextCursor    string     `json:"next_cursor,omitempty"`    // 空表示没有更多数据
-	Total         int        `json:"total,omitempty"`          // 排序模式：全表行数
-	ScanTruncated bool       `json:"scan_truncated,omitempty"` // 排序模式：超过扫描护栏被截断
+	Entries    []keyEntry `json:"entries"`
+	NextCursor string     `json:"next_cursor,omitempty"` // 空表示没有更多数据
 }
 
 // statsResponse 是 /api/stats 的存储概览。
@@ -208,10 +206,11 @@ func (s *adminServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// handleKeys 按 prefix 前缀扫描 + cursor 游标分页（O(1) Seek，与引擎侧一致）。
+// handleKeys 按 prefix 前缀扫描 + keyset cursor 游标分页。
 // 参数：prefix（原始字符串）、cursor（base64 的上页末 key）、limit（默认 50，上限 500）、
 // table_id（表过滤：仅扫描该表数据行，与生成代码的表前缀扫描同一物理语义）、
 // decode=1（数据行附带字段级解码，供标准表格视图渲染）。
+// 整数主键采用保序编码，表视图的物理顺序即主键数值顺序，无需整表扫描和内存排序。
 func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 	prefix := r.URL.Query().Get("prefix")
 	decode := r.URL.Query().Get("decode") == "1"
@@ -222,98 +221,20 @@ func (s *adminServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 表级过滤：物理前缀 [TableID Uvarint]（uvarint 编码首字节天然无歧义，
-	// 0xFF 索引空间不会落入任何表前缀，与生成代码 EncodeKey(tableID, nil) 一致）
-	tableID := uint64(0)
+	// 表级过滤：物理前缀 [0x00][TableHash 8B]。
 	if v := r.URL.Query().Get("table_id"); v != "" {
 		id, ok := parseUint64(v)
 		if !ok {
 			httpError(w, http.StatusBadRequest, fmt.Errorf("invalid table_id"))
 			return
 		}
-		tableID = id
-		prefix = string(encodeDataKeyPrefix(tableID))
-	}
-
-	// 表视图默认按主键排序：物理 Key 中 int 主键是小端编码，
-	// 字节序 ≠ 数值序（pk=256 会排在 pk=1 前），直接翻页展示为乱序。
-	// sort=physical 可回退物理序查看。
-	if tableID > 0 && r.URL.Query().Get("sort") != "physical" {
-		if ts := s.schema.table(tableID); ts != nil {
-			s.handleTableKeysSorted(w, r, ts, limit, decode)
-			return
-		}
+		prefix = string(encodeDataKeyPrefix(id))
 	}
 
 	s.handleKeysPhysical(w, r, prefix, limit, decode)
 }
 
-// maxTableScan 排序模式下单表最大扫描行数（调试工具的内存护栏）。
-const maxTableScan = 10000
-
-// handleTableKeysSorted 主键有序的表视图：
-// key-only 全表扫描（≤maxTableScan）→ 按主键类型排序 → 内存分页 →
-// 仅对当前页做点查取值与字段解码，避免全表 value 常驻内存。
-// 游标语义：排序模式下 cursor 为页偏移（十进制字符串）。
-func (s *adminServer) handleTableKeysSorted(w http.ResponseWriter, r *http.Request, ts *tableSchema, limit int, decode bool) {
-	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: encodeDataKeyPrefix(ts.TableID)})
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer iter.Close()
-
-	var keys [][]byte
-	prefix := encodeDataKeyPrefix(ts.TableID)
-	for iter.SeekGE(prefix); iter.Valid(); iter.Next() {
-		k := iter.Key()
-		if !strings.HasPrefix(string(k), string(prefix)) {
-			break
-		}
-		// 多收一条用于精确判定截断：恰好 maxTableScan 行时不算截断
-		if len(keys) > maxTableScan {
-			break
-		}
-		keys = append(keys, append([]byte(nil), k...)) // 拷贝：iter.Key 生命周期仅当次迭代
-	}
-	scanTruncated := len(keys) > maxTableScan
-	if scanTruncated {
-		keys = keys[:maxTableScan]
-	}
-	sort.Slice(keys, func(i, j int) bool { return comparePK(ts, keys[i], keys[j]) < 0 })
-
-	offset := 0
-	if cur := r.URL.Query().Get("cursor"); cur != "" {
-		v, err := strconv.Atoi(cur)
-		if err != nil || v < 0 {
-			httpError(w, http.StatusBadRequest, fmt.Errorf("invalid cursor (sorted mode expects offset)"))
-			return
-		}
-		offset = v
-	}
-
-	resp := keysResponse{Total: len(keys), ScanTruncated: scanTruncated}
-	if offset < len(keys) {
-		end := offset + limit
-		if end > len(keys) {
-			end = len(keys)
-		}
-		for _, k := range keys[offset:end] {
-			val, closer, err := s.db.Get(k)
-			if err != nil {
-				continue // 单行读取失败跳过，不阻断整页
-			}
-			resp.Entries = append(resp.Entries, s.buildEntry(k, val, decode))
-			closer.Close()
-		}
-		if end < len(keys) {
-			resp.NextCursor = strconv.Itoa(end)
-		}
-	}
-	writeJSON(w, resp)
-}
-
-// handleKeysPhysical 物理序扫描（全库模式 / sort=physical 回退）。
+// handleKeysPhysical 物理序扫描（全库与表视图共用）。
 func (s *adminServer) handleKeysPhysical(w http.ResponseWriter, r *http.Request, prefix string, limit int, decode bool) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte(prefix)})
 	if err != nil {
@@ -322,16 +243,18 @@ func (s *adminServer) handleKeysPhysical(w http.ResponseWriter, r *http.Request,
 	}
 	defer iter.Close()
 
-	// 游标定位：O(1) Seek 到上页末 key 的后继
+	// keyset 定位：直接 Seek 到上页末 key；仅当它仍存在时跳过自身。
+	// 即使该 key 或它之前的记录已删除，也不会按新 offset 跳过逻辑后继。
 	if cur := r.URL.Query().Get("cursor"); cur != "" {
 		last, err := base64.RawURLEncoding.DecodeString(cur)
-		if err != nil {
+		if err != nil || len(last) == 0 {
 			httpError(w, http.StatusBadRequest, fmt.Errorf("invalid cursor"))
 			return
 		}
-		succ := make([]byte, len(last)+1)
-		copy(succ, last)
-		iter.SeekGE(succ)
+		iter.SeekGE(last)
+		if iter.Valid() && bytes.Equal(iter.Key(), last) {
+			iter.Next()
+		}
 	} else {
 		iter.SeekGE([]byte(prefix))
 	}

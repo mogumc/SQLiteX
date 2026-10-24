@@ -171,6 +171,55 @@ func TestMultiplePuts(t *testing.T) {
 	}
 }
 
+func TestPrefixIteratorSeekAfter(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.WriteBatch([]KVPair{
+		{Key: []byte("p:a"), Value: []byte("a")},
+		{Key: []byte("p:c"), Value: []byte("c")},
+		{Key: []byte("p:e"), Value: []byte("e")},
+	}); err != nil {
+		t.Fatalf("seed keys: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		target     string
+		wantFirst  string
+		wantSecond string
+	}{
+		{name: "existing cursor", target: "p:a", wantFirst: "p:c", wantSecond: "p:e"},
+		{name: "deleted or missing cursor", target: "p:b", wantFirst: "p:c", wantSecond: "p:e"},
+		{name: "before first", target: "p:0", wantFirst: "p:a", wantSecond: "p:c"},
+		{name: "after last", target: "p:z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			iter := db.Iterate([]byte("p:"))
+			if iter == nil {
+				t.Fatal("nil iterator")
+			}
+			defer iter.Close()
+
+			iter.SeekAfter([]byte(tt.target))
+			if got := iter.Next(); got != (tt.wantFirst != "") {
+				t.Fatalf("first Next = %v, want %v", got, tt.wantFirst != "")
+			}
+			if tt.wantFirst == "" {
+				return
+			}
+			if got := string(iter.Key()); got != tt.wantFirst {
+				t.Fatalf("first key = %q, want %q", got, tt.wantFirst)
+			}
+			if !iter.Next() {
+				t.Fatal("missing second key")
+			}
+			if got := string(iter.Key()); got != tt.wantSecond {
+				t.Fatalf("second key = %q, want %q", got, tt.wantSecond)
+			}
+		})
+	}
+}
+
 // TestPutThrottled 验证队列满时触发背压。
 func TestPutThrottled(t *testing.T) {
 	dir := t.TempDir()

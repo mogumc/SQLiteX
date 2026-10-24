@@ -20,6 +20,38 @@ func newDB(t *testing.T) *sqlitex.DB {
 	return db
 }
 
+func TestSessionIndexedCursorAfterDelete(t *testing.T) {
+	db := newDB(t)
+	store := testmodels.NewSessionStore(db)
+	for id := int64(1); id <= 4; id++ {
+		if err := store.Create(&testmodels.Session{Id: id, Token: "tok", UserId: "shared"}); err != nil {
+			t.Fatalf("Create %d: %v", id, err)
+		}
+	}
+
+	page1, err := testmodels.NewSessionQuery(db).WhereUserId("=", "shared").Limit(2).Exec()
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if len(page1) != 2 || page1[0].Id != 1 || page1[1].Id != 2 {
+		t.Fatalf("unexpected page1: %+v", page1)
+	}
+	if err := store.Delete(1); err != nil {
+		t.Fatalf("delete before cursor: %v", err)
+	}
+	if err := store.Delete(2); err != nil {
+		t.Fatalf("delete cursor row: %v", err)
+	}
+
+	page2, err := testmodels.NewSessionQuery(db).WhereUserId("=", "shared").After(2).Limit(2).Exec()
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if len(page2) != 2 || page2[0].Id != 3 || page2[1].Id != 4 {
+		t.Fatalf("unexpected page2 after deleting cursor: %+v", page2)
+	}
+}
+
 // TestTTLLazyDeletionOnGet 验证 Get 路径的惰性删除:
 // 记录 1s 后过期 → Get 返回 nil 且物理删除。
 func TestTTLLazyDeletionOnGet(t *testing.T) {

@@ -1,6 +1,7 @@
 package sqlitex
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"sync"
@@ -22,7 +23,7 @@ type DB struct {
 	queue    *writequeue.Queue
 	cfg      Config
 	closed   atomic.Bool
-	metrics  *metrics // Config.Metrics=true 时非 nil
+	metrics  *metrics     // Config.Metrics=true 时非 nil
 	mu       sync.RWMutex // 保护 Pebble 访问，防止 Close 与读路径竞态
 }
 
@@ -376,6 +377,7 @@ type PrefixIterator struct {
 	iter    *pebble.Iterator
 	prefix  []byte
 	started bool
+	resumed bool // SeekAfter 已定位到待返回项，下一次 Next 不再前进
 }
 
 // Valid 返回迭代器当前位置是否有效且在指定前缀范围内。
@@ -397,7 +399,13 @@ func (it *PrefixIterator) Valid() bool {
 
 // Next 推进到下一个 Key。
 // 首次调用时定位到第一条记录，后续调用推进到下一条。
+// SeekAfter 后的首次调用返回已定位的记录，不会额外跳过一条。
 func (it *PrefixIterator) Next() bool {
+	if it.resumed {
+		it.resumed = false
+		it.started = true
+		return it.Valid()
+	}
 	if !it.started {
 		it.started = true
 		it.iter.First()
@@ -425,13 +433,27 @@ func (it *PrefixIterator) Close() error {
 // Seek 将迭代器定位到第一个 ≥ target 的 Key。
 func (it *PrefixIterator) Seek(target []byte) {
 	it.started = true
+	it.resumed = false
 	it.iter.SeekGE(target)
 }
 
-// SeekLT 将迭代器定位到最后一个 < target 的 Key，配合 Next 实现游标分页。
+// SeekLT 将迭代器定位到最后一个 < target 的 Key。
 func (it *PrefixIterator) SeekLT(target []byte) {
 	it.started = true
+	it.resumed = false
 	it.iter.SeekLT(target)
+}
+
+// SeekAfter 将迭代器定位到第一个 > target 的 Key，供 keyset 游标分页使用。
+// 与 SeekLT 不同，target 不存在时也不会跳过其逻辑后继；target 存在时仅跳过它自身。
+// 下一次 Next 返回定位到的第一条记录。
+func (it *PrefixIterator) SeekAfter(target []byte) {
+	it.iter.SeekGE(target)
+	if it.iter.Valid() && bytes.Equal(it.iter.Key(), target) {
+		it.iter.Next()
+	}
+	it.started = true
+	it.resumed = true
 }
 
 // Iterate 创建一个前缀迭代器，用于按 Key 顺序扫描指定前缀的所有记录。

@@ -317,28 +317,68 @@ func TestUserCursorPagination(t *testing.T) {
 	db := openTestDB(t)
 	store := testmodels.NewUserStore(db)
 
-	for i := int64(1); i <= 5; i++ {
-		store.Create(&testmodels.User{
-			Id: i, Name: fmt.Sprintf("U%d", i),
-			Email: fmt.Sprintf("u%d@t.com", i), Active: true,
-		})
+	// 覆盖负数、跨小端字节边界和大整数；物理顺序必须等于数值顺序。
+	ids := []int64{256, -1, 65536, 1, 257, 2}
+	for _, id := range ids {
+		if err := store.Create(&testmodels.User{
+			Id: id, Name: fmt.Sprintf("U%d", id),
+			Email: fmt.Sprintf("u%d@t.com", id), Active: true,
+		}); err != nil {
+			t.Fatalf("create user %d: %v", id, err)
+		}
 	}
 
+	assertIDs := func(page []*testmodels.User, want ...int64) {
+		t.Helper()
+		if len(page) != len(want) {
+			t.Fatalf("got %d rows, want %d", len(page), len(want))
+		}
+		for i := range want {
+			if page[i].Id != want[i] {
+				t.Fatalf("row %d id = %d, want %d", i, page[i].Id, want[i])
+			}
+		}
+	}
 	page1, err := testmodels.NewUserQuery(db).Limit(2).Exec()
 	if err != nil {
 		t.Fatalf("page1: %v", err)
 	}
-	if len(page1) != 2 {
-		t.Fatalf("page1: expected 2, got %d", len(page1))
+	assertIDs(page1, -1, 1)
+
+	// 删除游标之前的记录和游标本体，并在游标前插入新记录。
+	// keyset 分页不应像 offset 一样平移，也不能因游标本体消失而跳过后继。
+	if err := store.Delete(-1); err != nil {
+		t.Fatalf("delete before cursor: %v", err)
+	}
+	if err := store.Delete(1); err != nil {
+		t.Fatalf("delete cursor row: %v", err)
+	}
+	if err := store.Create(&testmodels.User{Id: -2, Name: "before", Email: "before@t.com"}); err != nil {
+		t.Fatalf("insert before cursor: %v", err)
+	}
+	updated, err := store.Get(2)
+	if err != nil || updated == nil {
+		t.Fatalf("load row to update: %v", err)
+	}
+	updated.Name = "updated"
+	if err := store.Update(updated); err != nil {
+		t.Fatalf("update after cursor: %v", err)
 	}
 
-	page2, err := testmodels.NewUserQuery(db).Limit(2).AfterKey(nil).Exec()
+	page2, err := testmodels.NewUserQuery(db).Limit(2).After(1).Exec()
 	if err != nil {
 		t.Fatalf("page2: %v", err)
 	}
-	if len(page2) != 2 {
-		t.Fatalf("page2: expected 2, got %d", len(page2))
+	assertIDs(page2, 2, 256)
+	if page2[0].Name != "updated" {
+		t.Fatalf("updated name = %q", page2[0].Name)
 	}
+
+	page3, err := testmodels.NewUserQuery(db).Limit(2).After(256).Exec()
+	if err != nil {
+		t.Fatalf("page3: %v", err)
+	}
+	assertIDs(page3, 257, 65536)
 }
 
 // ===== LIKE 模糊查询 =====

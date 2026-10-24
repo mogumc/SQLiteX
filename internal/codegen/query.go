@@ -96,11 +96,12 @@ import (
 )
 
 type {{.QueryName}} struct {
-	db      *sqlitex.DB
-	where   []string
-	args    []interface{}
-	limit   int
-	lastKey []byte
+	db       *sqlitex.DB
+	where    []string
+	args     []interface{}
+	limit    int
+	lastPK   []byte
+	afterSet bool
 }
 
 func New{{.QueryName}}(db *sqlitex.DB) *{{.QueryName}} {
@@ -116,7 +117,13 @@ func (q *{{$.QueryName}}) Where{{.GoName}}(op string, value {{.GoType}}) *{{$.Qu
 {{end}}
 
 func (q *{{.QueryName}}) Limit(n int) *{{.QueryName}} { q.limit = n; return q }
-func (q *{{.QueryName}}) AfterKey(lastKey []byte) *{{.QueryName}} { q.lastKey = lastKey; return q }
+// After 从上页末条主键之后继续查询。游标由主键重新构造，
+// 因此该记录或它之前的记录在两次请求之间被删除也不会导致分页漂移。
+func (q *{{.QueryName}}) After(lastPK {{.PKGoType}}) *{{.QueryName}} {
+	q.lastPK = encode{{.EntityName}}PrimaryKey(lastPK)
+	q.afterSet = true
+	return q
+}
 
 {{- if .IndexedField}}
 func (q *{{.QueryName}}) Exec() ([]*{{.EntityName}}, error) {
@@ -145,7 +152,7 @@ func (q *{{.QueryName}}) execIndexed() ([]*{{.EntityName}}, error) {
 	iter := q.db.Iterate(prefix)
 	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
+	if q.afterSet { iter.SeekAfter(encoding.EncodeIndexKey({{.TableID}}, {{.IndexedField.FieldNum}}, fieldValue, q.lastPK)) }
 
 	var results []*{{.EntityName}}
 	for iter.Next() {
@@ -179,7 +186,7 @@ func (q *{{.QueryName}}) execFullScan() ([]*{{.EntityName}}, error) {
 	iter := q.db.Iterate(prefix)
 	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
+	if q.afterSet { iter.SeekAfter(encoding.EncodeKey({{.TableID}}, q.lastPK)) }
 
 	var results []*{{.EntityName}}
 	for iter.Next() {

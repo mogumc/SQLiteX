@@ -132,9 +132,7 @@ async function fetchPage(cur) {
   nextCursor = r.next_cursor || ''
   document.getElementById('next').style.visibility = nextCursor ? 'visible' : 'hidden'
   document.getElementById('prev').style.visibility = cursors.length > 1 ? 'visible' : 'hidden'
-  document.getElementById('pageinfo').textContent =
-    (r.entries ? r.entries.length : 0) + ' 条 / 页' +
-    (r.total ? ' · 共 ' + r.total + ' 条' + (r.scan_truncated ? '+（超上限截断）' : '') : '')
+  document.getElementById('pageinfo').textContent = (r.entries ? r.entries.length : 0) + ' 条 / 页'
 }
 
 // 标准表格视图：列 = PK + schema 字段（+ TTL），行 = 字段级解码值

@@ -1,8 +1,16 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/cockroachdb/pebble"
+	sqlitexencoding "github.com/mogumc/sqlitex/internal/encoding"
 )
 
 // demoSchemaText 与 example/demo.proto 同构的最小 schema（避免跨目录读文件）。
@@ -84,9 +92,8 @@ func TestDecodeKeyDataAndIndex(t *testing.T) {
 	}
 	userTableHash := userTable.TableID
 
-	// 数据键: [0x00][TableHash 8B 定宽][PK int64 LE]
-	pk := make([]byte, 8)
-	binary.LittleEndian.PutUint64(pk, 42)
+	// 数据键: [0x00][TableHash 8B 定宽][PK int64 保序大端]
+	pk := sqlitexencoding.EncodeOrderedInt64(42)
 	dataKey := make([]byte, 1+8+8)
 	dataKey[0] = 0x00 // DataPrefix
 	binary.BigEndian.PutUint64(dataKey[1:9], userTableHash)
@@ -210,47 +217,183 @@ func TestTruncateForDump(t *testing.T) {
 	}
 }
 
-// TestComparePKInt64Order 验证主键数值序比较：
-// 小端编码下字节序≠数值序（256 的字节序先于 1），排序视图依赖本函数纠偏。
-func TestComparePKInt64Order(t *testing.T) {
+func TestDecodePKOrderedSigned(t *testing.T) {
 	ts := &tableSchema{PrimaryKey: pkSchema{Type: "int64"}}
-	mk := func(id int64) []byte {
-		// P0-4 新格式: [0x00][TableHash 8B][PK]
-		k := make([]byte, 1+8+8)
-		k[0] = dataKeyPrefix // 0x00
-		binary.BigEndian.PutUint64(k[1:9], 12345) // TableHash (任意值)
-		binary.LittleEndian.PutUint64(k[9:], uint64(id))
-		return k
-	}
-
-	// 数值递增序列；其字节序本身是乱序的（256 < 1 字节序）
-	ordered := []int64{-100, -1, 0, 1, 2, 3, 100, 255, 256, 257, 65535, 65536}
-	for i := 0; i+1 < len(ordered); i++ {
-		a, b := mk(ordered[i]), mk(ordered[i+1])
-		if got := comparePK(ts, a, b); got >= 0 {
-			t.Errorf("comparePK(%d, %d) = %d, want <0", ordered[i], ordered[i+1], got)
+	for _, want := range []int64{-1 << 63, -257, -1, 0, 1, 256, 1<<63 - 1} {
+		if got := decodePK(ts, sqlitexencoding.EncodeOrderedInt64(want)); got != want {
+			t.Errorf("decodePK(%d) = %v", want, got)
 		}
-		if got := comparePK(ts, b, a); got <= 0 {
-			t.Errorf("comparePK(%d, %d) = %d, want >0", ordered[i+1], ordered[i], got)
-		}
-	}
-	if got := comparePK(ts, mk(5), mk(5)); got != 0 {
-		t.Errorf("comparePK(5,5) = %d, want 0", got)
 	}
 }
 
-// TestComparePKStringOrder 字符串主键退化为字典序。
-func TestComparePKStringOrder(t *testing.T) {
-	ts := &tableSchema{PrimaryKey: pkSchema{Type: "string"}}
-	mk := func(pk string) []byte {
-		// P0-4 新格式: [0x00][TableHash 8B][PK]
-		k := make([]byte, 1+8+len(pk))
-		k[0] = dataKeyPrefix // 0x00
-		binary.BigEndian.PutUint64(k[1:9], 12345) // TableHash (任意值)
-		copy(k[9:], pk)
-		return k
+func newPaginationTestServer(t *testing.T) (*adminServer, *tableSchema) {
+	t.Helper()
+	db, err := pebble.Open(t.TempDir(), &pebble.Options{})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
 	}
-	if comparePK(ts, mk("abc"), mk("abd")) >= 0 {
-		t.Error("string PK should compare lexicographically")
+	t.Cleanup(func() { db.Close() })
+
+	s := &adminServer{db: db, schema: newSchemaStore()}
+	if err := s.schema.importProto("test.proto", demoSchemaText); err != nil {
+		t.Fatalf("import proto: %v", err)
+	}
+	_, tables := s.schema.snapshot()
+	return s, tables[0]
+}
+
+func setPaginationTestRow(t *testing.T, s *adminServer, tableID uint64, id int64, value []byte) {
+	t.Helper()
+	key := sqlitexencoding.EncodeKey(tableID, sqlitexencoding.EncodeOrderedInt64(id))
+	if err := s.db.Set(key, value, pebble.NoSync); err != nil {
+		t.Fatalf("set id %d: %v", id, err)
+	}
+}
+
+func deletePaginationTestRow(t *testing.T, s *adminServer, tableID uint64, id int64) {
+	t.Helper()
+	key := sqlitexencoding.EncodeKey(tableID, sqlitexencoding.EncodeOrderedInt64(id))
+	if err := s.db.Delete(key, pebble.NoSync); err != nil {
+		t.Fatalf("delete id %d: %v", id, err)
+	}
+}
+
+func getPaginationTestPage(t *testing.T, s *adminServer, tableID uint64, cursor string, limit int) keysResponse {
+	t.Helper()
+	url := fmt.Sprintf("/api/keys?table_id=%d&limit=%d", tableID, limit)
+	if cursor != "" {
+		url += "&cursor=" + cursor // RawURLEncoding 无需再次转义
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	recorder := httptest.NewRecorder()
+	s.handleKeys(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleKeys status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var resp keysResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return resp
+}
+
+func assertPaginationTestIDs(t *testing.T, ts *tableSchema, resp keysResponse, want ...int64) {
+	t.Helper()
+	if len(resp.Entries) != len(want) {
+		t.Fatalf("got %d rows, want %d", len(resp.Entries), len(want))
+	}
+	for i, entry := range resp.Entries {
+		raw, err := base64.RawURLEncoding.DecodeString(entry.KeyB64)
+		if err != nil {
+			t.Fatalf("decode row key: %v", err)
+		}
+		if got := decodePK(ts, raw[9:]); got != want[i] {
+			t.Fatalf("row %d id = %v, want %d", i, got, want[i])
+		}
+	}
+}
+
+func TestAdminTableCursorStableAfterMutations(t *testing.T) {
+	s, ts := newPaginationTestServer(t)
+	for _, id := range []int64{256, -1, 65536, 1, 257, 2} {
+		setPaginationTestRow(t, s, ts.TableID, id, []byte("value"))
+	}
+
+	page1 := getPaginationTestPage(t, s, ts.TableID, "", 2)
+	assertPaginationTestIDs(t, ts, page1, -1, 1)
+	if page1.NextCursor == "" {
+		t.Fatal("page1 missing next cursor")
+	}
+
+	deletePaginationTestRow(t, s, ts.TableID, -1) // 游标前删除
+	deletePaginationTestRow(t, s, ts.TableID, 1)  // 删除游标本体
+	setPaginationTestRow(t, s, ts.TableID, -2, []byte("inserted"))
+	setPaginationTestRow(t, s, ts.TableID, 2, []byte("updated"))
+
+	page2 := getPaginationTestPage(t, s, ts.TableID, page1.NextCursor, 2)
+	assertPaginationTestIDs(t, ts, page2, 2, 256)
+	page3 := getPaginationTestPage(t, s, ts.TableID, page2.NextCursor, 2)
+	assertPaginationTestIDs(t, ts, page3, 257, 65536)
+	if page3.NextCursor != "" {
+		t.Fatal("last page should not have next cursor")
+	}
+}
+
+func TestAdminTableCursorBeyondLegacyScanLimit(t *testing.T) {
+	s, ts := newPaginationTestServer(t)
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	for id := int64(0); id <= 10000; id++ {
+		key := sqlitexencoding.EncodeKey(ts.TableID, sqlitexencoding.EncodeOrderedInt64(id))
+		if err := batch.Set(key, []byte("v"), pebble.NoSync); err != nil {
+			t.Fatalf("batch set id %d: %v", id, err)
+		}
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		t.Fatalf("commit rows: %v", err)
+	}
+
+	cursor := base64.RawURLEncoding.EncodeToString(
+		sqlitexencoding.EncodeKey(ts.TableID, sqlitexencoding.EncodeOrderedInt64(9990)),
+	)
+	page := getPaginationTestPage(t, s, ts.TableID, cursor, 20)
+	want := make([]int64, 0, 10)
+	for id := int64(9991); id <= 10000; id++ {
+		want = append(want, id)
+	}
+	assertPaginationTestIDs(t, ts, page, want...)
+	if page.NextCursor != "" {
+		t.Fatal("page after last row should not have next cursor")
+	}
+}
+
+// BenchmarkAdminTableFirstPage 对比旧“全表扫描+排序”和新 keyset 首页读取成本。
+// 小端数据仅用于让旧版本基准也能构造同样的 1 万行输入，不断言本基准中的主键值。
+func BenchmarkAdminTableFirstPage(b *testing.B) {
+	db, err := pebble.Open(b.TempDir(), &pebble.Options{})
+	if err != nil {
+		b.Fatalf("open pebble: %v", err)
+	}
+	b.Cleanup(func() { db.Close() })
+	s := &adminServer{db: db, schema: newSchemaStore()}
+	if err := s.schema.importProto("test.proto", demoSchemaText); err != nil {
+		b.Fatalf("import proto: %v", err)
+	}
+	_, tables := s.schema.snapshot()
+	tableID := tables[0].TableID
+
+	batch := db.NewBatch()
+	for id := uint64(0); id < 10000; id++ {
+		key := make([]byte, 17)
+		key[0] = dataKeyPrefix
+		binary.BigEndian.PutUint64(key[1:9], tableID)
+		binary.LittleEndian.PutUint64(key[9:], id)
+		if err := batch.Set(key, []byte("v"), pebble.NoSync); err != nil {
+			b.Fatalf("batch set: %v", err)
+		}
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		b.Fatalf("commit rows: %v", err)
+	}
+	if err := batch.Close(); err != nil {
+		b.Fatalf("close batch: %v", err)
+	}
+
+	url := fmt.Sprintf("/api/keys?table_id=%d&limit=50", tableID)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		recorder := httptest.NewRecorder()
+		s.handleKeys(recorder, req)
+		if recorder.Code != http.StatusOK {
+			b.Fatalf("status = %d", recorder.Code)
+		}
+		var resp keysResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+			b.Fatalf("decode response: %v", err)
+		}
+		if len(resp.Entries) != 50 {
+			b.Fatalf("got %d entries, want 50", len(resp.Entries))
+		}
 	}
 }

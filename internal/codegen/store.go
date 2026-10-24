@@ -333,21 +333,13 @@ func encode{{.MessageName}}PrimaryKey({{.PKGoName}} {{.PKGoType}}) []byte {
 	{{- else if eq .PKGoType "[]byte"}}
 	return {{.PKGoName}}
 	{{- else if eq .PKGoType "int64"}}
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64({{.PKGoName}}))
-	return buf
+	return encoding.EncodeOrderedInt64({{.PKGoName}})
 	{{- else if eq .PKGoType "uint64"}}
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, {{.PKGoName}})
-	return buf
+	return encoding.EncodeOrderedUint64({{.PKGoName}})
 	{{- else if eq .PKGoType "int32"}}
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, uint32({{.PKGoName}}))
-	return buf
+	return encoding.EncodeOrderedInt32({{.PKGoName}})
 	{{- else if eq .PKGoType "uint32"}}
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, {{.PKGoName}})
-	return buf
+	return encoding.EncodeOrderedUint32({{.PKGoName}})
 	{{- else}}
 	return []byte(fmt.Sprintf("%v", {{.PKGoName}}))
 	{{- end}}

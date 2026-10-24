@@ -20,6 +20,55 @@ const DataPrefix = 0x00
 // IndexPrefix 索引键空间的 tag 字节。
 const IndexPrefix = 0xFF
 
+// EncodeOrderedInt64 将有符号整数编码为保持数值序的 8 字节大端格式。
+// 翻转符号位后，bytes.Compare 的顺序与 int64 数值顺序一致。
+func EncodeOrderedInt64(v int64) []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(v)^(uint64(1)<<63))
+	return buf
+}
+
+// DecodeOrderedInt64 解码 EncodeOrderedInt64 的结果。b 必须至少包含 8 字节。
+func DecodeOrderedInt64(b []byte) int64 {
+	return int64(binary.BigEndian.Uint64(b) ^ (uint64(1) << 63))
+}
+
+// EncodeOrderedUint64 将无符号整数编码为保持数值序的 8 字节大端格式。
+func EncodeOrderedUint64(v uint64) []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, v)
+	return buf
+}
+
+// DecodeOrderedUint64 解码 EncodeOrderedUint64 的结果。b 必须至少包含 8 字节。
+func DecodeOrderedUint64(b []byte) uint64 {
+	return binary.BigEndian.Uint64(b)
+}
+
+// EncodeOrderedInt32 将有符号整数编码为保持数值序的 4 字节大端格式。
+func EncodeOrderedInt32(v int32) []byte {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, uint32(v)^(uint32(1)<<31))
+	return buf
+}
+
+// DecodeOrderedInt32 解码 EncodeOrderedInt32 的结果。b 必须至少包含 4 字节。
+func DecodeOrderedInt32(b []byte) int32 {
+	return int32(binary.BigEndian.Uint32(b) ^ (uint32(1) << 31))
+}
+
+// EncodeOrderedUint32 将无符号整数编码为保持数值序的 4 字节大端格式。
+func EncodeOrderedUint32(v uint32) []byte {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, v)
+	return buf
+}
+
+// DecodeOrderedUint32 解码 EncodeOrderedUint32 的结果。b 必须至少包含 4 字节。
+func DecodeOrderedUint32(b []byte) uint32 {
+	return binary.BigEndian.Uint32(b)
+}
+
 // EncodeKey 将 TableHash 与 PrimaryKey 拼接为数据行物理 Key。
 // 格式: [0x00][TableHash 8B 定宽][PrimaryKey]
 func EncodeKey(tableHash uint64, pk []byte) []byte {

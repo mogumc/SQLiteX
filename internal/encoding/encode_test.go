@@ -75,6 +75,60 @@ func TestEncodeKey_LexicographicOrder(t *testing.T) {
 	}
 }
 
+func TestOrderedIntegerCodecsPreserveLexicographicOrder(t *testing.T) {
+	t.Run("int64", func(t *testing.T) {
+		values := []int64{-1 << 63, -65536, -257, -256, -2, -1, 0, 1, 255, 256, 65536, 1<<63 - 1}
+		for i, v := range values {
+			encoded := EncodeOrderedInt64(v)
+			if got := DecodeOrderedInt64(encoded); got != v {
+				t.Fatalf("roundtrip(%d) = %d", v, got)
+			}
+			if i > 0 && bytes.Compare(EncodeOrderedInt64(values[i-1]), encoded) >= 0 {
+				t.Fatalf("physical order violates numeric order: %d >= %d", values[i-1], v)
+			}
+		}
+	})
+
+	t.Run("uint64", func(t *testing.T) {
+		values := []uint64{0, 1, 255, 256, 65536, 1 << 32, 1 << 63, ^uint64(0)}
+		for i, v := range values {
+			encoded := EncodeOrderedUint64(v)
+			if got := DecodeOrderedUint64(encoded); got != v {
+				t.Fatalf("roundtrip(%d) = %d", v, got)
+			}
+			if i > 0 && bytes.Compare(EncodeOrderedUint64(values[i-1]), encoded) >= 0 {
+				t.Fatalf("physical order violates numeric order: %d >= %d", values[i-1], v)
+			}
+		}
+	})
+
+	t.Run("int32", func(t *testing.T) {
+		values := []int32{-1 << 31, -65536, -257, -1, 0, 1, 255, 256, 65536, 1<<31 - 1}
+		for i, v := range values {
+			encoded := EncodeOrderedInt32(v)
+			if got := DecodeOrderedInt32(encoded); got != v {
+				t.Fatalf("roundtrip(%d) = %d", v, got)
+			}
+			if i > 0 && bytes.Compare(EncodeOrderedInt32(values[i-1]), encoded) >= 0 {
+				t.Fatalf("physical order violates numeric order: %d >= %d", values[i-1], v)
+			}
+		}
+	})
+
+	t.Run("uint32", func(t *testing.T) {
+		values := []uint32{0, 1, 255, 256, 65536, 1 << 31, ^uint32(0)}
+		for i, v := range values {
+			encoded := EncodeOrderedUint32(v)
+			if got := DecodeOrderedUint32(encoded); got != v {
+				t.Fatalf("roundtrip(%d) = %d", v, got)
+			}
+			if i > 0 && bytes.Compare(EncodeOrderedUint32(values[i-1]), encoded) >= 0 {
+				t.Fatalf("physical order violates numeric order: %d >= %d", values[i-1], v)
+			}
+		}
+	})
+}
+
 // TestEncodeKey_TableIsolation 验证不同 TableID 的 Key 前缀互不相同。
 func TestEncodeKey_TableIsolation(t *testing.T) {
 	pk := []byte("same-pk")

@@ -4,15 +4,15 @@
 package demo
 
 import (
-	"strings"
-	"sync"
-	zstd "github.com/klauspost/compress/zstd"
+	"encoding/binary"
 	"fmt"
 	"bytes"
 	"github.com/mogumc/sqlitex"
+	"strings"
 	"time"
-	"encoding/binary"
+	zstd "github.com/klauspost/compress/zstd"
 	"github.com/mogumc/sqlitex/internal/encoding"
+	"sync"
 )
 
 
@@ -322,20 +322,19 @@ func (s *userStore) Get(Id int64) (*User, error) {
 
 // encodeUserPrimaryKey 编码主键为字节切片。
 func encodeUserPrimaryKey(Id int64) []byte {
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(Id))
-	return buf
+	return encoding.EncodeOrderedInt64(Id)
 }
 func encodeUserIndexEmailValue(v string) []byte { return []byte(v) }
 func encodeUserIndexCreatedAtValue(v int64) []byte { buf := make([]byte, 8); binary.LittleEndian.PutUint64(buf, uint64(v)); return buf }
 
 
 type UserQuery struct {
-	db      *sqlitex.DB
-	where   []string
-	args    []interface{}
-	limit   int
-	lastKey []byte
+	db       *sqlitex.DB
+	where    []string
+	args     []interface{}
+	limit    int
+	lastPK   []byte
+	afterSet bool
 }
 
 func NewUserQuery(db *sqlitex.DB) *UserQuery {
@@ -375,7 +374,13 @@ func (q *UserQuery) WhereBio(op string, value string) *UserQuery {
 
 
 func (q *UserQuery) Limit(n int) *UserQuery { q.limit = n; return q }
-func (q *UserQuery) AfterKey(lastKey []byte) *UserQuery { q.lastKey = lastKey; return q }
+// After 从上页末条主键之后继续查询。游标由主键重新构造，
+// 因此该记录或它之前的记录在两次请求之间被删除也不会导致分页漂移。
+func (q *UserQuery) After(lastPK int64) *UserQuery {
+	q.lastPK = encodeUserPrimaryKey(lastPK)
+	q.afterSet = true
+	return q
+}
 func (q *UserQuery) Exec() ([]*User, error) {
 	if len(q.where) > 0 {
 		parts := splitWhere(q.where[0])
@@ -394,7 +399,7 @@ func (q *UserQuery) execIndexed() ([]*User, error) {
 	iter := q.db.Iterate(prefix)
 	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
+	if q.afterSet { iter.SeekAfter(encoding.EncodeIndexKey(6216217600485199210, 3, fieldValue, q.lastPK)) }
 
 	var results []*User
 	for iter.Next() {
@@ -416,7 +421,7 @@ func (q *UserQuery) execFullScan() ([]*User, error) {
 	iter := q.db.Iterate(prefix)
 	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
+	if q.afterSet { iter.SeekAfter(encoding.EncodeKey(6216217600485199210, q.lastPK)) }
 
 	var results []*User
 	for iter.Next() {
@@ -851,9 +856,7 @@ func (s *sessionStore) Get(Id int64) (*Session, error) {
 
 // encodeSessionPrimaryKey 编码主键为字节切片。
 func encodeSessionPrimaryKey(Id int64) []byte {
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(Id))
-	return buf
+	return encoding.EncodeOrderedInt64(Id)
 }
 func encodeSessionIndexUserIdValue(v string) []byte { return []byte(v) }
 
@@ -903,11 +906,12 @@ func (s *sessionStore) PurgeExpired() (int, error) {
 
 
 type SessionQuery struct {
-	db      *sqlitex.DB
-	where   []string
-	args    []interface{}
-	limit   int
-	lastKey []byte
+	db       *sqlitex.DB
+	where    []string
+	args     []interface{}
+	limit    int
+	lastPK   []byte
+	afterSet bool
 }
 
 func NewSessionQuery(db *sqlitex.DB) *SessionQuery {
@@ -935,7 +939,13 @@ func (q *SessionQuery) WhereActive(op string, value bool) *SessionQuery {
 
 
 func (q *SessionQuery) Limit(n int) *SessionQuery { q.limit = n; return q }
-func (q *SessionQuery) AfterKey(lastKey []byte) *SessionQuery { q.lastKey = lastKey; return q }
+// After 从上页末条主键之后继续查询。游标由主键重新构造，
+// 因此该记录或它之前的记录在两次请求之间被删除也不会导致分页漂移。
+func (q *SessionQuery) After(lastPK int64) *SessionQuery {
+	q.lastPK = encodeSessionPrimaryKey(lastPK)
+	q.afterSet = true
+	return q
+}
 func (q *SessionQuery) Exec() ([]*Session, error) {
 	if len(q.where) > 0 {
 		parts := splitWhere(q.where[0])
@@ -954,7 +964,7 @@ func (q *SessionQuery) execIndexed() ([]*Session, error) {
 	iter := q.db.Iterate(prefix)
 	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
+	if q.afterSet { iter.SeekAfter(encoding.EncodeIndexKey(12471666076920910287, 3, fieldValue, q.lastPK)) }
 
 	var results []*Session
 	for iter.Next() {
@@ -980,7 +990,7 @@ func (q *SessionQuery) execFullScan() ([]*Session, error) {
 	iter := q.db.Iterate(prefix)
 	if iter == nil { return nil, nil }
 	defer iter.Close()
-	if len(q.lastKey) > 0 { iter.SeekLT(q.lastKey); if iter.Valid() { iter.Next() } }
+	if q.afterSet { iter.SeekAfter(encoding.EncodeKey(12471666076920910287, q.lastPK)) }
 
 	var results []*Session
 	for iter.Next() {

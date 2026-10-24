@@ -26,7 +26,7 @@ const (
 //   - 主键: id
 //   - 二级索引: email (唯一), created_at (普通)
 //   - 字段压缩: bio (大文本按需 zstd 压缩)
-//   - 游标分页: AfterKey + Limit
+//   - 游标分页: After + Limit
 type User struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`

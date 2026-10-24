@@ -55,10 +55,13 @@ TTL 惰性删除 (Lazy Deletion)： 支持在 Protobuf 中声明 TTL，读取时
 
 ### 索引机制与游标分页 (Indexing & Cursor Pagination)
 
-_核心机制： 编译时自动维护索引，强制 O(1) 游标寻址，消灭深分页性能灾难。_
+_核心机制：编译时自动维护索引，保序主键 + keyset 游标寻址，避免深分页扫描与 offset 漂移。_
 
-自动化二级索引： 在 Protobuf 中引入索引 Option（如 [(sqlitex.index) = UNIQUE] 或普通索引）。编译时自动生成维护二级索引（IndexKey -> PrimaryKey）的写入逻辑与强类型查询 API，支持等值与前缀范围查询。  
-游标分页算法 (Cursor Pagination)： API 强制采用游标机制，彻底抛弃传统 OFFSET。底层寻址键拼接为 `[0xFF] + [TableHash] + [FieldNum] + [LastIndexValue] + [LastPK]`，调用 Pebble 的 Seek 将迭代器瞬间移动到上一页物理边界并向后迭代，单次分页延迟始终恒定为 O(1)。  
+自动化二级索引：在 Protobuf 中引入索引 Option（如 [(sqlitex.index) = UNIQUE] 或普通索引）。编译时自动生成维护二级索引（IndexKey -> PrimaryKey）的写入逻辑与强类型查询 API，支持等值与前缀范围查询。
+
+保序主键编码：无符号整数使用大端编码，有符号整数翻转符号位后使用大端编码，使物理 Key 的字典序与主键数值序一致，无需为有序翻页额外扫描和排序整表。
+
+游标分页算法 (Cursor Pagination)：生成查询器通过 `After(lastPK)` 接收上页末条主键，底层构造数据键或 `[0xFF] + [TableHash] + [FieldNum] + [LastIndexValue] + [LastPK]` 索引键，Seek 到第一个严格大于游标的记录。单页成本为 `O(log N + 页大小)`，与已翻页数无关；删除游标前记录或游标本体不会导致后续页按新 offset 漂移。
 
 ### 开发者体验与可观测性 (Developer Experience & Observability)
 

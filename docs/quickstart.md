@@ -19,7 +19,7 @@ import "sqlitex/options.proto";
 //   - 主键: id
 //   - 二级索引: email (唯一), created_at (普通)
 //   - 字段压缩: bio (大文本按需 zstd 压缩)
-//   - 游标分页: AfterKey + Limit 替代 OFFSET
+//   - 游标分页: After + Limit 替代 OFFSET
 message User {
   option (sqlitex.table).primary_key = "id";
 
@@ -112,13 +112,24 @@ users, _ := q.WhereEmail("=", "alice@example.com").Exec()
 // 索引范围查询
 recent, _ := q.WhereCreatedAt(">=", 1700000000).WhereActive("=", true).Limit(10).Exec()
 
-// 游标分页（替代 OFFSET）
-var lastKey []byte
+// 强类型 keyset 游标分页（替代 OFFSET）
+var lastID int64
+hasCursor := false
 for {
-    page, _ := q.WhereCreatedAt(">=", 1700000000).AfterKey(lastKey).Limit(20).Exec()
+    query := demo.NewUserQuery(db).
+        WhereCreatedAt(">=", 1700000000).
+        Limit(20)
+    if hasCursor {
+        query.After(lastID) // 直接传上页末条主键，不要传 Serialize() 的结果
+    }
+    page, err := query.Exec()
+    if err != nil { log.Fatal(err) }
     if len(page) == 0 { break }
-    lastKey = page[len(page)-1].Serialize() // 或从迭代器取
-    // 处理 page
+
+    // 处理 page；即使翻页间删除了 lastID 对应记录，下一页也不会漂移。
+    lastID = page[len(page)-1].Id
+    hasCursor = true
+    if len(page) < 20 { break }
 }
 
 // 计数

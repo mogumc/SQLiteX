@@ -71,9 +71,10 @@ it.Close()
 | `Next() bool`           | 前进到下一项，无更多返回 false |
 | `Key() []byte`          | 当前 key                       |
 | `Value() []byte`        | 当前 value                     |
-| `Seek(target []byte)`   | 定位到 ≥ target 的位置        |
-| `SeekLT(target []byte)` | 定位到 < target 的位置         |
-| `Close() error`         | 释放迭代器                     |
+| `Seek(target []byte)`      | 定位到 ≥ target 的位置；下一次 `Next` 继续前进 |
+| `SeekLT(target []byte)`    | 定位到 < target 的位置；下一次 `Next` 继续前进 |
+| `SeekAfter(target []byte)` | 定位到 > target 的位置；下一次 `Next` 返回该位置，target 不存在也不会跳过后继 |
+| `Close() error`            | 释放迭代器 |
 
 ### 5. 缓存统计
 
@@ -203,7 +204,7 @@ q := NewUserQuery(db).
     WhereEmail(">=", "a@example.com").  // 索引字段 → 走索引扫描
     WhereActive("=", true).             // 非索引字段 → 内存过滤
     Limit(20).
-    AfterKey(lastKey)                    // 游标分页
+    After(lastID)                        // 上页末条主键；首页不调用
 
 results, err := q.Exec()   // []*User
 first, err  := q.First()   // *User（nil 表示无）
@@ -221,8 +222,10 @@ count, err  := q.Count()   // int
 
 **索引字段与非索引字段的查询语义不同**：
 
-- **索引字段**（声明了 `INDEX_*`）→ 走二级索引扫描，`AfterKey` 可用作游标分页。
-- **非索引字段** → 全表扫描 + 内存过滤，`AfterKey` 忽略。
+- **索引字段等值查询**（声明了 `INDEX_*`）→ 走二级索引扫描；`After(lastPK)` 按“索引值 + 主键”定位下一条。
+- **其它条件** → 主键序全表扫描 + 内存过滤；`After(lastPK)` 按数据 Key 定位下一条。
+
+`After` 是强类型 keyset 游标，参数类型与表主键一致。每次翻页应新建 Query（或至少不要重复叠加 Where 条件），将上页末条记录的主键传入；首页不调用。底层定位到第一个**严格大于**该主键边界的记录，因此删除游标前记录或游标本体不会造成 offset 式漂移。`After` 不提供跨请求快照，游标后的新增记录可能出现在后续页。
 
 ### 4. 编码层（`internal/encoding`）
 
@@ -237,10 +240,14 @@ func DecodeIndexKey(raw []byte) (tableHash uint64, fieldNum int32, fieldValue, p
 Key 布局：
 
 ```
-数据行:   [0x00][TableHash 8B 大端][PrimaryKey]
-索引行:   [0xFF][TableHash 8B 大端][FieldNum 1B][ValueLen Uvarint][FieldValue][PrimaryKey]
+数据行:   [0x00][TableHash 8B 大端][PrimaryKey 保序编码]
+索引行:   [0xFF][TableHash 8B 大端][FieldNum 1B][ValueLen Uvarint][FieldValue][PrimaryKey 保序编码]
 唯一索引: [0xFF][TableHash 8B 大端][FieldNum 1B][ValueLen Uvarint][FieldValue]（无 PK 后缀，PK 存于 Value）
 ```
+
+整数主键采用保序编码：`uint32/uint64` 使用大端；`int32/int64` 先翻转符号位再使用大端。这样同表数据 Key 的字典序就是主键数值序，有序分页无需整表重排。此编码只用于 **Key 中的主键**，Value 字段序列化仍沿用原小端格式。
+
+> ⚠️ **破坏性变更（无自动迁移）**：旧版整数主键使用小端编码，新版无法按原主键读取这些记录；普通索引的 PK 后缀也同步改变。必须用旧代码导出、重新生成 `*_sqlitex.go` 后再灌入。生成查询器的 `AfterKey([]byte)` 同步替换为强类型 `After(lastPK)`，调用方改为传上页末条主键，不再传序列化 Value 或手工拼接物理 Key。
 
 **TableHash 是消息全名（`go_package + "." + MessageName`）的 FNV-1a 64 位哈希**，由 codegen 在生成期算定并硬编码进生成代码（生成期做碰撞校验，冲突直接报 error 而非静默错位）。要点：
 

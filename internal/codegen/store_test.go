@@ -49,9 +49,9 @@ func TestGenerateStore(t *testing.T) {
 		}
 	}
 
-	// 主键编码检查
-	if !strings.Contains(code, "binary.LittleEndian.PutUint64(buf, uint64(Id))") {
-		t.Error("missing primary key encoding for int64")
+	// 主键必须使用保序编码，物理字典序才能直接用于 keyset 分页。
+	if !strings.Contains(code, "return encoding.EncodeOrderedInt64(Id)") {
+		t.Error("missing order-preserving primary key encoding for int64")
 	}
 
 	t.Logf("Generated store code (%d bytes):\n%s", len(code), code)
